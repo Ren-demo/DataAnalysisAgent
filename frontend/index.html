@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>智能数据分析系统</title>
+    <script>
+      // 首屏前消除主题闪烁（FOUC）：与 src/composables/useDark.ts 使用同一 storage key 与规则
+      ;(function () {
+        var p = localStorage.getItem('app-theme') || 'system'
+        var dark =
+          p === 'dark' ||
+          (p === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+        document.documentElement.classList.toggle('dark', dark)
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

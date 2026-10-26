@@ -1,0 +1,31 @@
+# 版本策略：本文件写**下限**（`>=`），便于按需升级；但 `>=` 会随时间漂移
+# （`pandas>=2.2` 实际已解到 3.0.5、`numpy>=1.26` 已解到 2.5.2，都是大版本跳跃）。
+# 本文件是依赖的唯一来源（项目不再维护 requirements.lock）。
+fastapi>=0.115
+python-multipart>=0.0.9
+uvicorn[standard]>=0.30
+sqlalchemy>=2.0.30
+pandas>=2.2
+numpy>=1.26
+openpyxl>=3.1
+pydantic>=2.7
+pydantic-settings>=2.3
+langchain==1.2.12
+langgraph==1.1.2
+langgraph-checkpoint==4.0.1
+langgraph-prebuilt==1.0.8
+langgraph-sdk==0.3.9
+langchain-openai>=0.2
+sqlglot>=26.0
+python-dotenv>=1.0
+pymysql>=1.1
+psycopg2-binary>=2.9.9
+motor>=3.6.0
+# 可选：非结构化文档解析 + 决策报告联网检索（缺失时静默降级，不影响主链路）
+python-docx>=1.1.0
+pypdf>=4.0.0
+tavily-python>=0.5.0
+# 向量检索（Milvus + 外部 embedding，必需）
+# 注意：langchain-milvus 0.3.x + pymilvus 2.6.x 存在连接别名 bug，须用 0.4.0 + pymilvus 3.x
+pymilvus==3.0.1
+langchain-milvus==0.4.0

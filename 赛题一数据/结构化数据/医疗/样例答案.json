@@ -1,0 +1,12 @@
+[
+  {
+    "id": 1,
+    "problem": "查下咱医院有多少个科室？，请输出对应SQL语句",
+    "sql": "SELECT COUNT(*) AS 科室数量 FROM departments_wards WHERE is_active = TRUE;"
+  },
+  {
+    "id": 2,
+    "problem": "列出所有姓张的患者名字和手机号，请输出对应SQL语句",
+    "sql": "SELECT patient_name, contact_phone FROM patient_master_index WHERE patient_name LIKE '张%';"
+  }
+]

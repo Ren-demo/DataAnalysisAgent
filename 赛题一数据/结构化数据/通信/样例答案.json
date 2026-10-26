@@ -1,0 +1,12 @@
+[
+  {
+    "id": 1,
+    "problem": "找出所有在北京的用户，请输出对应SQL语句",
+    "sql": "SELECT customer_id, customer_name FROM customers WHERE address_json LIKE '%北京市%'"
+  },
+  {
+    "id": 2,
+    "problem": "列出所有欠费的用户，请输出对应SQL语句",
+    "sql": "SELECT customer_id, customer_name, customer_status FROM customers WHERE customer_status = '欠费'"
+  }
+]

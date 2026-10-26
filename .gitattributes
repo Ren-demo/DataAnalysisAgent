@@ -1,0 +1,7 @@
+赛题一数据/结构化数据/医疗/Healthcare_Analytics_Competition.xlsx filter=lfs diff=lfs merge=lfs -text
+赛题一数据/非结构化数据/Multi-step_Retrieval-数据.md filter=lfs diff=lfs merge=lfs -text
+赛题一数据/非结构化数据/Table_Domain-specific_Operations-数据.md filter=lfs diff=lfs merge=lfs -text
+赛题一数据/非结构化数据/Table_Query-数据.md filter=lfs diff=lfs merge=lfs -text
+赛题一数据/结构化数据/金融/financial_asset_management.xlsx filter=lfs diff=lfs merge=lfs -text
+赛题一数据/结构化数据/通信/telecom_operations_db.xlsx filter=lfs diff=lfs merge=lfs -text
+赛题一数据/结构化数据/医疗/Healthcare_Analytics_Competition.xlsx filter=lfs diff=lfs merge=lfs -text

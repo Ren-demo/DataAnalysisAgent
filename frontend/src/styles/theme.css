@@ -1,0 +1,83 @@
+/* 设计 token：全项目配色唯一来源。
+   覆盖 Element Plus 的 --el-* 变量（主色 + 中性色），并定义应用级 --app-* 变量。
+   必须在 element-plus/dist/index.css 与 dark/css-vars.css 之后引入，才能生效。
+   主色由 #409eff 调整为 DeepSeek 风格深蓝 #4d6bfe。 */
+
+:root {
+  color-scheme: light;
+
+  /* —— 主色及其变体（浅色：light-N 向白混合、dark-2 向黑混合）—— */
+  --el-color-primary: #4d6bfe;
+  --el-color-primary-light-3: #8b97fe;
+  --el-color-primary-light-5: #a6b5ff;
+  --el-color-primary-light-7: #cad3ff;
+  --el-color-primary-light-8: #dbe1ff;
+  --el-color-primary-light-9: #edf0ff;
+  --el-color-primary-dark-2: #3e56cb;
+
+  /* —— 圆角放大，贴近现代对话产品 —— */
+  --el-border-radius-base: 8px;
+  --el-border-radius-small: 6px;
+  --el-border-radius-round: 20px;
+
+  /* —— 对齐 Element Plus 中性色到灰阶 —— */
+  --el-bg-color-page: #f7f7f8;
+  --el-text-color-primary: #111827;
+  --el-text-color-regular: #4b5563;
+  --el-text-color-secondary: #9ca3af;
+  --el-border-color: #e5e7eb;
+  --el-border-color-light: #ececf0;
+  --el-border-color-lighter: #f0f0f3;
+  --el-fill-color-light: #f6f7f9;
+
+  /* —— 应用级 token —— */
+  --app-bg-page: #f7f7f8;
+  --app-bg-header: rgba(247, 247, 248, 0.72);
+  --app-bg-card: #ffffff;
+  --app-bg-input: #ffffff;
+  --app-bg-code: #f6f7f9;
+  --app-bg-hover: #f0f1f3;
+  --app-user-bubble: #4d6bfe;
+  --app-user-bubble-text: #ffffff;
+  --app-border: #e5e7eb;
+  --app-border-strong: #d1d5db;
+  --app-text-1: #111827;
+  --app-text-2: #4b5563;
+  --app-text-3: #9ca3af;
+  --app-shadow: 0 8px 30px rgba(0, 0, 0, 0.08);
+  --app-shadow-input: 0 0 0 1px rgba(0, 0, 0, 0.03), 0 12px 32px rgba(0, 0, 0, 0.08);
+}
+
+html.dark {
+  color-scheme: dark;
+
+  /* —— 深色下主色略提亮，保证深底可读性；变体向黑/白反向混合 —— */
+  --el-color-primary: #5c78ff;
+  --el-color-primary-light-3: #364bb2;
+  --el-color-primary-light-5: #27367f;
+  --el-color-primary-light-7: #17204c;
+  --el-color-primary-light-8: #0f1533;
+  --el-color-primary-light-9: #080b19;
+  --el-color-primary-dark-2: #7189fe;
+
+  /* —— 页面底对齐 DeepSeek 的 #17171a（EP 默认 #0a0a0a 偏黑）—— */
+  --el-bg-color-page: #17171a;
+  --el-bg-color: #17171a;
+
+  /* —— 应用级 token —— */
+  --app-bg-page: #17171a;
+  --app-bg-header: rgba(23, 23, 26, 0.72);
+  --app-bg-card: #1f1f23;
+  --app-bg-input: #1f1f23;
+  --app-bg-code: #26262b;
+  --app-bg-hover: #26262b;
+  --app-user-bubble: #4d6bfe;
+  --app-user-bubble-text: #ffffff;
+  --app-border: #2e2e33;
+  --app-border-strong: #3a3a40;
+  --app-text-1: #e5e7eb;
+  --app-text-2: #9ca3af;
+  --app-text-3: #6b7280;
+  --app-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+  --app-shadow-input: 0 0 0 1px rgba(255, 255, 255, 0.04), 0 12px 32px rgba(0, 0, 0, 0.5);
+}
