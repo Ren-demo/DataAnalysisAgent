@@ -1,18 +1,25 @@
 
-"""应用配置：通过 pydantic-settings 读取环境变量与 backend/.env。"""
+"""应用配置：通过 pydantic-settings 读取环境变量与项目根目录的 .env。"""
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # backend 根目录（本文件位于 backend/app/config.py，向上两级）
 BACKEND_DIR = Path(__file__).resolve().parent.parent
+# 项目根目录：.env 统一放在这里，本地开发与 docker compose 共用同一份配置
+# （compose 也从根目录 .env 插值，不再有两份互相覆盖的环境文件）。
+PROJECT_DIR = BACKEND_DIR.parent
+# 容器内应用位于 /app/app，PROJECT_DIR 解析为 /，/.env 不存在 ——
+# pydantic-settings 对缺失的 env_file 静默跳过，容器里的配置全部来自环境变量
+# （由 docker-compose.yml 的 environment 注入）。
+ENV_FILE = PROJECT_DIR / ".env"
 
 
 class Settings(BaseSettings):
     """全局配置。"""
 
     model_config = SettingsConfigDict(
-        env_file=str(BACKEND_DIR / ".env"),
+        env_file=str(ENV_FILE),
         env_file_encoding="utf-8",
         extra="ignore",
     )

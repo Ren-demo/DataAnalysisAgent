@@ -85,7 +85,7 @@ npm install
 npm run build   # vue-tsc 类型检查 + vite 打包
 ```
 
-## 四、环境变量（backend/.env）
+## 四、环境变量（项目根目录 .env）
 
 | 变量 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |

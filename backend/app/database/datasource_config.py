@@ -12,7 +12,7 @@ from app.config import BACKEND_DIR
 
 logger = logging.getLogger(__name__)
 
-# 配置文件路径（与 .env 同级，位于 backend 根目录）
+# 配置文件路径（datasources.json 位于 backend 根目录；.env 已统一放在项目根目录）
 DS_CONFIG_PATH = BACKEND_DIR / "datasources.json"
 
 

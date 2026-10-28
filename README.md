@@ -45,6 +45,7 @@ E:/ChongqingAI/
 ├── README.md                 # 项目总览（本文件）
 ├── CLAUDE.md                 # 项目开发约定（需求/决策记录）
 ├── describe.md               # 赛题说明
+├── .env                      # 环境变量（DeepSeek / MongoDB / embedding / Milvus；本地开发与 compose 共用）
 ├── docs/                     # 文档
 │   ├── architecture.md       # 系统架构说明
 │   ├── dependencies.md       # 环境依赖版本清单
@@ -52,11 +53,10 @@ E:/ChongqingAI/
 ├── backend/                  # 后端（FastAPI）
 │   ├── requirements.txt
 │   ├── datasources.json      # 外部数据源配置（MySQL/PostgreSQL，当前为空）
-│   ├── .env                  # 环境变量（DeepSeek / MongoDB / embedding / Milvus）
 │   ├── data/                 # SQLite 数据文件（uploads.db / docs.db）+ knowledge/ 本地知识库
 │   └── app/
 │       ├── main.py           # 应用入口，挂载路由（prefix=/api）
-│       ├── config.py         # 配置（Settings，加载 backend/.env）
+│       ├── config.py         # 配置（Settings，加载项目根目录 .env）
 │       ├── schemas.py        # Pydantic v2 数据模型（请求/响应）
 │       ├── errors.py         # 统一业务异常（error_code + 友好中文提示）
 │       ├── database/         # 数据层
@@ -122,7 +122,7 @@ python -m venv .venv
 # 安装依赖
 pip install -r requirements.txt
 
-# 配置环境变量（编辑 backend/.env）
+# 配置环境变量（编辑项目根目录的 .env）
 
 # 确保 MongoDB 运行于 localhost:27017（会话记忆依赖，缺失时记忆功能静默跳过）
 # 向量检索需本地 Milvus（docker，http://localhost:19530）与外部 embedding（DashScope），二者为硬依赖
@@ -141,7 +141,7 @@ npm run dev    # 访问 http://localhost:5173
 
 ### 3. 环境变量
 
-在后端根目录的 `backend/.env` 中配置（本项目已配置）：
+在项目根目录的 `.env` 中配置（本项目已配置；本地开发与 Docker compose 共用同一份）：
 
 ```ini
 # LLM
@@ -196,7 +196,7 @@ curl -N -X POST http://localhost:8000/api/chat/stream \
 
 - 只有 frontend 映射宿主机端口（默认 80）；后端与中间件只在 `app-net` 内部可达。
 - 不使用 `vite preview`（开发预览服务器）。生产静态服务是零第三方依赖的 `frontend/server.mjs`，同时处理 SSE 透传、gzip、缓存头、SPA 回退与客户端断开清理。
-- `backend/.env` 仅用于本地开发；容器里的配置全部由 compose 从根目录 `.env` 注入。
+- 环境变量只有**一份**：项目根目录的 `.env`。本地开发由 `app/config.py` 直接读取；容器里不包含该文件（后端镜像的构建上下文是 `./backend`），配置由 compose 从同一个 `.env` 插值后经 `environment` 注入。
 
 ### 2. 前置条件
 
@@ -266,7 +266,7 @@ docker run --rm -v chongqing-ai_backend_data:/data -v "$PWD":/backup alpine \
 - 安全组/防火墙只放行 `80`（启用 HTTPS 时再加 443）。
 - 中间件的宿主机端口在 compose 里默认是注释状态；需要 Attu / MinIO 控制台时再打开，并限制来源 IP。
 - `MONGO_ROOT_PASSWORD` 必须修改；密码建议只用字母数字（它会被拼进 `mongodb://` URI，含 `@ : / # ? $` 时需要 URL 编码）。
-- `.env` 不要提交，镜像构建时也已通过 `.dockerignore` 排除。
+- `.env` 不要提交到版本库（`.gitignore` 已忽略）；根目录 `.env` 也不在后端镜像的构建上下文（`./backend`）内，不会被打进镜像。
 - 无 nginx 时的 HTTPS：可用云厂商负载均衡/证书，或在 Node 前面加一层 Caddy/Traefik；当前 compose 默认 HTTP。
 
 ### 8. 常见问题

@@ -115,7 +115,7 @@
 
 | 文件 | 职责 | 关键函数 / 模型 |
 | --- | --- | --- |
-| `app/config.py` | 配置管理，加载 `backend/.env` | `Settings`（deepseek_* / mongo_* / embedding_* / milvus_* / chat_history_* / doc_* / web_search_* / knowledge_base_enabled / `sse_heartbeat_seconds`（SSE 保活间隔，默认 10）/ `agent_recursion_limit`（agent 步数兜底，默认 40））；`settings` 单例 |
+| `app/config.py` | 配置管理，加载项目根目录 `.env` | `Settings`（deepseek_* / mongo_* / embedding_* / milvus_* / chat_history_* / doc_* / web_search_* / knowledge_base_enabled / `sse_heartbeat_seconds`（SSE 保活间隔，默认 10）/ `agent_recursion_limit`（agent 步数兜底，默认 40））；`settings` 单例 |
 | `app/schemas.py` | Pydantic v2 请求/响应模型 | `ColumnInfo` / `TableInfo` / `DataSourceInfo` / `SchemaResponse` / `QueryRequest` / `ChatRequest` / `ChatMessage` / `QueryResponse`（含 `kind`/`answer`/`error_code`/`chart_type`） |
 | `app/errors.py` | 统一业务异常 | `AppError`（携带 `message` 与 `error_code`） |
 | `app/database/engine.py` | 多数据源路由 + 引擎缓存 + 结构读取 + 关联关系识别 | `get_engine()` / `get_dialect()` / `get_schema_info()` / `build_schema_text()` / `resolve_data_source_type()` |
@@ -165,7 +165,7 @@
 
 | error_code | 触发场景 | 用户提示（示例） |
 | --- | --- | --- |
-| `NO_API_KEY` | 未配置 `DEEPSEEK_API_KEY` | 「尚未配置大模型服务，请在 backend/.env 中填写 DEEPSEEK_API_KEY 后重启服务。」 |
+| `NO_API_KEY` | 未配置 `DEEPSEEK_API_KEY` | 「智能问答服务暂未开通，请联系管理员完成配置后重试。」（配置项写在项目根目录 `.env`） |
 | `LLM_UNAVAILABLE` | 初始化失败 / 网络异常 / 超时 | 「大模型服务暂时不可用，请稍后重试或检查网络与 API Key 配置。」 |
 | `SQL_ERROR` | 生成的 SQL 无法执行或多次校验未通过 | 「多次生成 SQL 均未通过语法校验，请换一种方式描述问题。」 |
 | `DATASOURCE_UNAVAILABLE` | 外部数据源不可用（连接失败等） | 「数据源不可用，请检查连接配置。」 |

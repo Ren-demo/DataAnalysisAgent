@@ -21,7 +21,7 @@ python -m venv .venv
 # 3. 安装依赖
 pip install -r requirements.txt
 
-# 4. 配置环境变量（本项目已配置 DEEPSEEK_API_KEY，如需修改编辑 backend/.env）
+# 4. 配置环境变量（本项目已配置 DEEPSEEK_API_KEY，如需修改编辑项目根目录的 ../.env）
 
 # 5. 确保 MongoDB 运行于 localhost:27017（会话记忆依赖，缺失时记忆功能静默跳过）
 
@@ -163,7 +163,7 @@ curl -N -X POST http://localhost:8000/api/chat/stream \
 
 - **近期窗口**：只保留最近 `CHAT_HISTORY_MAX_MESSAGES`（默认 20）条历史进 prompt，另有 `CHAT_HISTORY_MAX_TOKENS`（默认 2400）的 token 预算做二次裁剪。
 - **滚动摘要**：窗口之前的旧对话增量折叠成一段 ≤ `CHAT_SUMMARY_MAX_CHARS`（默认 300）字的摘要，存于会话文档的 `summary` / `summary_upto` 字段；喂给 LLM 时以「摘要 + 近期窗口」替代全量历史，保留长期记忆。
-- 三者均可在 `backend/.env` 用同名大写键覆盖（`CHAT_HISTORY_MAX_MESSAGES` / `CHAT_HISTORY_MAX_TOKENS` / `CHAT_SUMMARY_MAX_CHARS`）。
+- 三者均可在项目根目录的 `.env` 用同名大写键覆盖（`CHAT_HISTORY_MAX_MESSAGES` / `CHAT_HISTORY_MAX_TOKENS` / `CHAT_SUMMARY_MAX_CHARS`）。
 - 全程静默降级：MongoDB / LLM 不可用时回退为纯截断，不产生 error 事件。
 
 > 说明：意图分类本身已截取最近 6 条历史；text2sql / 决策报告 / 重绘链路本就不携带历史，不受此治理影响。
@@ -184,7 +184,7 @@ curl -N -X POST http://localhost:8000/api/chat/stream \
 
 - **联网搜索默认关闭**（`WEB_SEARCH_PROVIDER=none`）。一旦设为 `duckduckgo` / `tavily`，决策报告 agent 在推理过程中**会把用户提问按原样发往第三方搜索服务** —— 这是数据外发行为，请自行评估是否可接受。`knowledge_search` 只读本地目录 `data/knowledge`，不外发数据。
 - 用户提问本身会发往 DeepSeek API（`DEEPSEEK_BASE_URL`），embedding 会发往 `EMBEDDING_BASE_URL`，均为链路必需。
-- `backend/.env` 含真实密钥，**不要提交到版本库**；仓库只提交占位模板 `backend/.env.example`（复制为 `.env` 后填写）。本仓库当前**不是 git 仓库**，一旦 `git init`，请先 `git status --porcelain` 确认 `.env` 未被跟踪。
+- 项目根目录的 `.env` 含真实密钥，**不要提交到版本库**（`.gitignore` 已忽略）；仓库只提交占位模板 `.env.example`（复制为 `.env` 后填写）。提交前可用 `git status --porcelain` 确认 `.env` 未被跟踪。
 - 若密钥曾经外泄（截图、日志、共享终端等），到 DeepSeek / 阿里云控制台**轮换密钥**后再更新 `.env`。
 
 ## 数据分析（统计建模）
@@ -235,7 +235,7 @@ curl -N -X POST http://localhost:8000/api/chat/stream \
 
 ## 运行配置与资源上限
 
-以下均可在 `backend/.env` 用同名大写键覆盖（默认值见 `app/config.py`）。
+以下均可在项目根目录的 `.env` 用同名大写键覆盖（默认值见 `app/config.py`）。
 
 ### 超时与重试
 
