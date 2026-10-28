@@ -145,7 +145,12 @@ onMounted(async () => {
   } catch {
     // 后端未启动时静默，前端仍可输入
   }
-  await restoreSession()
+  try {
+    await restoreSession()
+  } catch {
+    // 会话 id 生成 / 恢复失败绝不能中断挂载：否则下面的会话列表刷新也不会执行，
+    // 界面看起来「一切正常」却没有任何历史会话（见 randomUUID 的说明）
+  }
   refreshSessions()
 })
 
@@ -247,9 +252,38 @@ function buildHistory(): HistoryMessage[] {
   return history
 }
 
+/**
+ * 生成 UUID v4。
+ *
+ * `crypto.randomUUID` 只在**安全上下文**（HTTPS 或 localhost）里存在，用
+ * `http://<公网IP>` 打开时它是 `undefined`，直接调用抛 TypeError。该异常会中断
+ * `restoreSession`，`sessionId` 永远是空串，请求体里也就没有 `session_id` ——
+ * 后端据此静默跳过持久化，表现为「对话完全正常，但历史会话一条都没有」。
+ * `crypto.getRandomValues` 在非安全上下文仍可用，故用它兜底。
+ */
+function randomUUID(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  const bytes = new Uint8Array(16)
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    crypto.getRandomValues(bytes)
+  } else {
+    for (let i = 0; i < 16; i += 1) bytes[i] = Math.floor(Math.random() * 256)
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40 // 版本号 4
+  bytes[8] = (bytes[8] & 0x3f) | 0x80 // variant 10xx
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
 function newSessionId(): string {
-  const id = crypto.randomUUID()
-  localStorage.setItem(SESSION_STORAGE_KEY, id)
+  const id = randomUUID()
+  try {
+    localStorage.setItem(SESSION_STORAGE_KEY, id)
+  } catch {
+    // 隐私模式 / 存储被禁用：只失去跨刷新恢复能力，本轮会话照常可用
+  }
   return id
 }
 

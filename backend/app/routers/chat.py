@@ -193,7 +193,14 @@ async def _chat_stream_response(request: ChatRequest):
             if event.get("type") == "result":
                 final_result = event.get("data") or {}
                 # 关键修复：拿到最终结果立即持久化，避免被后续可选 report 节点耗时 / 流中断拖累
-                if request.session_id and not final_result.get("error"):
+                if not request.session_id:
+                    # 不能静默：session_id 由前端生成，缺失时整轮对话**完全不落库**，
+                    # 而用户侧毫无异常（对话正常、只是历史会话里没有它）。早前这里
+                    # 一行日志都没有，与「MongoDB 写入失败」在日志上无法区分。
+                    logger.info("请求未携带 session_id，本轮对话不写入会话记忆。")
+                elif final_result.get("error"):
+                    logger.info("本轮结果为错误，未写入会话记忆：%s", final_result.get("error_code"))
+                else:
                     message_id = await record_turn(
                         request.session_id,
                         request.question,
