@@ -22,12 +22,12 @@ services:
     container_name: mongodb
     restart: unless-stopped
     environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-root}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-root}
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: root
       TZ: Asia/Shanghai
     # 生产不直接暴露数据库端口；调试时取消注释
-    # ports:
-    #   - "27017:27017"
+    ports:
+      - "27017:27017"
     volumes:
       - ./data/mongodb:/data/db
     healthcheck:
@@ -73,9 +73,9 @@ services:
       - ./data/milvus/minio:/minio_data
     command: minio server /minio_data --console-address ":9001"
     # 调试可视化用；生产默认不暴露 MinIO 控制台
-    # ports:
-    #   - "9001:9001"
-    #   - "9000:9000"
+    ports:
+      - "9001:9001"
+      - "9000:9000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 30s
@@ -99,9 +99,9 @@ services:
     volumes:
       - ./data/milvus/data:/var/lib/milvus
     # 生产不直接暴露 gRPC / 指标端口；调试时取消注释
-    # ports:
-    #   - "19530:19530"
-    #   - "9091:9091"
+    ports:
+      - "19530:19530"
+      - "9091:9091"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
       interval: 30s
@@ -128,8 +128,8 @@ services:
     environment:
       MILVUS_URL: standalone:19530
     # 需要 Attu 时取消注释；它没有登录鉴权，务必限制来源 IP
-    # ports:
-    #   - "8001:3000"
+    ports:
+      - "8001:3000"
     depends_on:
       standalone:
         condition: service_started

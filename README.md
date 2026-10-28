@@ -1,6 +1,7 @@
 # 智能数据分析系统
 
-> 赛题 1「智能数据分析系统」· 难度：初级
+> 基于 2026年第二届重庆市AI大模型创新应用大赛
+> 九天·梧桐赛道 赛题 1「智能数据分析系统」· 难度：初级
 > AI 驱动的对话式数据分析工具：用自然语言提问，自动生成查询语句、执行分析、输出结构化结果与可视化图表。
 
 ## 一、项目简介
@@ -11,30 +12,30 @@
 
 ## 二、功能特性
 
-| 能力 | 状态 | 说明 |
-| --- | --- | --- |
-| 自然语言 → SQL | ✅ 已实现 | 通过 DeepSeek 大模型（多方言 few-shot）生成标准查询语句，并用 sqlglot 只读校验 |
-| 查询执行 | ✅ 已实现 | 自动执行 SQL，返回结构化结果（列名 + 行数据 + 行数）；SQL 默认不展示，仅用户明确要求输出时展示 |
-| 意图分类 | ✅ 已实现 | query/chat/redraw/retrieval/analysis/schema 六类分流：查询 / 闲聊·元数据咨询 / 图表重绘 / 文档问答 / 统计建模分析 / 表结构列名咨询 |
-| 智能可视化 | ✅ 已实现 | 严格图表模式：仅当用户显式指定柱状/折线/饼图时才出图，否则 table |
-| 友好错误处理 | ✅ 已实现 | 模型不可用（未配置 Key / 网络异常）时返回带 `error_code` 的友好提示，不伪造结果 |
-| 多数据源适配 | ✅ 已实现 | SQLite 上传库 + Excel/CSV 上传 + 非结构化文档 + MySQL/PostgreSQL（静态 `datasources.json` + 前端运行时输入连接存 MongoDB `connections`） |
-| 多表关联查询 | ✅ 已实现 | 显式外键 + 命名推断自动识别关联关系，注入 schema 提示供 JOIN |
-| 非结构化文档问答 | ✅ 已实现 | .md/.txt/.pdf/.docx 解析，表格入 SQLite、文本向量化入 Milvus 检索回答 |
-| 会话记忆 | ✅ 已实现 | MongoDB 记录「问题 + 回答 + 数据源」，历史会话侧栏，刷新保持当前对话 |
-| 决策报告 | ✅ 已实现 | LangGraph + `create_agent` 多步下钻产出结构化报告；可选 web_search 联网搜索 + knowledge_search 本地知识库检索 |
-| 自动数据建模（异常检测 / 数据挖掘 / 时序预测） | ✅ 已实现 | 线性回归、时序预测（线性/移动平均/复合增长率外推）、异常检测（z-score/IQR）、K-Means 聚类，numpy 手写零新依赖 |
+| 能力 | 说明 |
+| --- | --- |
+| 自然语言 → SQL | 通过 DeepSeek 大模型（多方言 few-shot）生成标准查询语句，并用 sqlglot 只读校验 |
+| 查询执行 | 自动执行 SQL，返回结构化结果（列名 + 行数据 + 行数）；SQL 默认不展示，仅用户明确要求输出时展示 |
+| 意图分类 | query/chat/redraw/retrieval/analysis/schema 六类分流：查询 / 闲聊·元数据咨询 / 图表重绘 / 文档问答 / 统计建模分析 / 表结构列名咨询 |
+| 智能可视化 | 严格图表模式：仅当用户显式指定柱状/折线/饼图时才出图，否则 table |
+| 友好错误处理 | 模型不可用（未配置 Key / 网络异常）时返回带 `error_code` 的友好提示，不伪造结果 |
+| 多数据源适配 | SQLite 上传库 + Excel/CSV 上传 + 非结构化文档 + MySQL/PostgreSQL（静态 `datasources.json` + 前端运行时输入连接存 MongoDB `connections`） |
+| 多表关联查询 | 显式外键 + 命名推断自动识别关联关系，注入 schema 提示供 JOIN |
+| 非结构化文档问答 | .md/.txt/.pdf/.docx 解析，表格入 SQLite、文本向量化入 Milvus 检索回答 |
+| 会话记忆 | MongoDB 记录「问题 + 回答 + 数据源」，历史会话侧栏，刷新保持当前对话 |
+| 决策报告 | LangGraph + `create_agent` 多步下钻产出结构化报告；可选 web_search 联网搜索 + knowledge_search 本地知识库检索 |
+| 自动数据建模（异常检测 / 数据挖掘 / 时序预测） | 线性回归、时序预测（线性/移动平均/复合增长率外推）、异常检测（z-score/IQR）、K-Means 聚类，numpy 手写零新依赖 |
 
 ## 三、技术栈总览
 
 - **架构形态**：前后端分离（前端 SPA 独立构建 / 静态托管；后端提供 REST 接口）
-- **前端**：Vue 3 + TypeScript + Vite + Element Plus + ECharts（`vue-echarts`）+ axios + marked/DOMPurify（Markdown 渲染）+ 亮/暗主题切换
+- **前端**：Vue 3 + TypeScript + Vite + Element Plus + ECharts（vue-echarts）+ axios + marked/DOMPurify（Markdown 渲染）+ 亮/暗主题切换
 - **后端**：Python 3.10+ / FastAPI + Uvicorn
-- **Agent / 编排**：LangChain 1.2 `create_agent` 工具调用智能体 + LangGraph 1.1 `StateGraph` 编排（10 节点：classify/prepare_query/text2sql/execute/report/redraw/chat/retrieve/schema/analysis）；agent 边跑边发 `progress` 步骤事件，SSE 静默期下发 `: keepalive` 注释行保活
-- **LLM**：DeepSeek（`deepseek-v4-pro`，低配 `deepseek-v4-flash`），经 `langchain-openai` 的 `ChatOpenAI` 接入；外部 embedding（阿里云 DashScope `text-embedding-v4`）
+- **Agent / 编排**：LangChain 1.2 create_agent 工具调用智能体 + LangGraph 1.1 StateGraph 编排（10 节点：classify/prepare_query/text2sql/execute/report/redraw/chat/retrieve/schema/analysis）；agent 边跑边发 `progress` 步骤事件，SSE 静默期下发 : keepalive 注释行保活
+- **LLM**：DeepSeek（ deepseek-v4-flash），经 langchain-openai 的 ChatOpenAI 接入；外部 embedding（阿里云 DashScope text-embedding-v4`）
 - **数据层**：SQLAlchemy 2.x（统一 SQLite / MySQL / PostgreSQL）+ pandas（Excel/CSV 处理）
-- **会话记忆**：Motor（异步 MongoDB 驱动，`localhost:27017`，集合 `sessions` / `connections`）
-- **向量检索**：Milvus（本地 docker，经 `langchain-milvus`）+ 外部 embedding（硬依赖，无 BM25）
+- **会话记忆**：Motor（异步 MongoDB 驱动，localhost:27017，集合 sessions / connections）
+- **向量检索**：Milvus（本地 docker，经 langchain-milvus）+ 外部 embedding（硬依赖，无 BM25）
 - **SQL 校验**：sqlglot（只读守卫）
 
 ## 四、目录结构
@@ -121,7 +122,7 @@ python -m venv .venv
 # 安装依赖
 pip install -r requirements.txt
 
-# 配置环境变量（本项目已配置 DEEPSEEK_API_KEY、EMBEDDING_*、MONGO_*，如需修改编辑 backend/.env）
+# 配置环境变量（编辑 backend/.env）
 
 # 确保 MongoDB 运行于 localhost:27017（会话记忆依赖，缺失时记忆功能静默跳过）
 # 向量检索需本地 Milvus（docker，http://localhost:19530）与外部 embedding（DashScope），二者为硬依赖
@@ -290,16 +291,16 @@ docker run --rm -v chongqing-ai_backend_data:/data -v "$PWD":/backup alpine \
 * 自然语言 → SQL（DeepSeek 多方言 few-shot + sqlglot 校验 + 失败重试）
 * 意图分类（query/chat/redraw/retrieval 四类分流）
 * 统一错误处理（模型不可用时返回友好提示，不设规则兜底）
-* 查询执行与结构化结果（`POST /api/query`）
+* 查询执行与结构化结果（POST /api/query）
 * 图表类型推断（严格模式：bar / line / pie / table）
-* 数据源上传（Excel/CSV → SQLite，`POST /api/datasources/upload`）
+* 数据源上传（Excel/CSV → SQLite，POST /api/datasources/upload）
 * 多数据源路由（SQLite + 上传 + MySQL/PostgreSQL + 文档数据源）
-* 外部数据库连接管理（`/api/connections`，前端运行时输入并持久化到 MongoDB）
+* 外部数据库连接管理（/api/connections，前端运行时输入并持久化到 MongoDB）
 * 多表关联查询（显式外键 + 命名推断，注入 JOIN 提示）
 * 非结构化文档问答（.md/.txt/.pdf/.docx 解析 + Milvus 向量检索）
 * 决策报告（LangGraph + `create_agent` 下钻推理 + 可选联网/知识检索）
 * 自动数据建模（线性回归 / 时序预测 / 异常检测 / K-Means 聚类，numpy 手写）
-* SSE 流式对话输出（`POST /api/query/stream`、`POST /api/chat/stream`）
+* SSE 流式对话输出（POST /api/query/stream、POST /api/chat/stream）
 * 前端查询面板 + 结果表格 + ECharts 图表渲染 + 决策报告卡片 + 错误通知 + Markdown 回答 + 会话侧栏 + 主题切换
 
 ## 八、相关文档

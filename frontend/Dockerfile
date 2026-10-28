@@ -7,7 +7,7 @@
 #   3) SSE 字节级透传（不缓冲）
 # ============================================================
 
-FROM node:22-alpine AS builder
+FROM node:22-bookworm-slim AS builder
 
 WORKDIR /app
 
@@ -20,7 +20,7 @@ COPY . .
 RUN npm run build
 
 
-FROM node:22-alpine AS runtime
+FROM node:22-bookworm-slim AS runtime
 
 ENV NODE_ENV=production \
     PORT=3000 \

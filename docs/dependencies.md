@@ -106,7 +106,7 @@ npm run build   # vue-tsc 类型检查 + vite 打包
 | `DOC_CHUNK_SIZE` | 否 | `500` | 文档分块长度（字符） |
 | `DOC_CHUNK_OVERLAP` | 否 | `100` | 文档分块重叠长度 |
 | `DOC_TOP_K` | 否 | `5` | 检索返回 top-k 片段数 |
-| `WEB_SEARCH_PROVIDER` | 否 | `duckduckgo` | 联网搜索提供商（none/duckduckgo/tavily） |
+| `WEB_SEARCH_PROVIDER` | 否 | `none` | 联网搜索提供商（none/duckduckgo/tavily）；默认关闭，属数据外发，需显式开启 |
 | `TAVILY_API_KEY` | 否 | （空） | Tavily 联网搜索 key（provider=tavily 时需配） |
 | `WEB_SEARCH_MAX_RESULTS` | 否 | `5` | 联网搜索最大结果数 |
 | `KNOWLEDGE_BASE_ENABLED` | 否 | `true` | 是否启用本地知识库检索 |
