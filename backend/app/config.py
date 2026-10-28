@@ -72,7 +72,7 @@ class Settings(BaseSettings):
     report_enabled: bool = True
 
     # 资源上限（防止超大上传/超长请求体打爆内存与上下文）
-    max_upload_mb: int = 20          # 单个上传文件大小上限（Excel/CSV/文档共用）
+    max_upload_mb: int = 200          # 单个上传文件大小上限（Excel/CSV/文档共用）
     max_question_chars: int = 2000   # 单条提问长度上限
     max_history_messages: int = 200  # 请求历史保留的最近条数（超出丢弃最早的，不报错）
     max_message_chars: int = 20000   # 单条历史消息长度上限（助手答案可能较长，故放宽）
