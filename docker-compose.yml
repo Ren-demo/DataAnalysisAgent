@@ -18,7 +18,7 @@ name: chongqing-ai
 services:
   # ================= MongoDB（会话记忆 / 外部连接配置） =================
   mongodb:
-    image: mongo:7.0
+    image: mongo:latest
     container_name: mongodb
     restart: unless-stopped
     environment:
