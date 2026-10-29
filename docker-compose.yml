@@ -29,7 +29,7 @@ services:
     ports:
       - "27017:27017"
     volumes:
-      - ./data/mongodb:/data/db
+      - mongo_data:/data/db
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
       interval: 10s
@@ -120,7 +120,7 @@ services:
     networks:
       - app-net
 
-  # ================= Milvus 可视化管理工具（默认不对外） =================
+  # ================= Milvus 可视化管理工具 =================
   attu:
     image: zilliz/attu:latest
     container_name: milvus-attu
@@ -228,6 +228,7 @@ services:
 
 volumes:
   backend_data:
+  mongo_data:
 
 networks:
   app-net:
