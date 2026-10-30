@@ -33,3 +33,4 @@ temp/
 CLAUDE.local.md
 .mcp.json
 .worktreeinclude
+**/CLAUDE.md
