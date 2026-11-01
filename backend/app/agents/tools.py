@@ -109,7 +109,16 @@ def build_tools(engine: Engine, dialect: str, schema_text: str) -> list:
             [_to_json_safe(v) for v in row]
             for row in df.itertuples(index=False, name=None)
         ][:MAX_ROWS]
-        return {"ok": True, "columns": columns, "rows": rows, "row_count": len(rows)}
+        # row_count 必须是 真实总行数
+        total = int(len(df))
+        return {
+            "ok": True,
+            "columns": columns,
+            "rows": rows,
+            "row_count": total,
+            "returned_rows": len(rows),
+            "truncated": total > len(rows),
+        }
 
     tools = [get_schema, generate_sql, execute_sql]
     # 联网搜索：provider 为 none 时不注册（静默跳过）

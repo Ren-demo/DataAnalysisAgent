@@ -92,6 +92,9 @@ class QueryRequest(BaseModel):
     # 显式指定的图表类型（bar/line/pie）。早前这两个端点无从指定，chart_hint 恒为 None，
     # 于是「严格图表模式」下它们**永远只能出表格**；/api/chat/stream 则由意图分类自动识别。
     chart_hint: Literal["bar", "line", "pie"] | None = None
+    # 显式指定**多种**图表类型（按指标列顺序对应），如 ["bar", "line"]。
+    # 与 chart_hint 并存：新客户端优先传这个，旧的单值字段继续可用。
+    chart_hints: list[Literal["bar", "line", "pie"]] | None = None
 
 
 class ChatMessage(BaseModel):
@@ -136,6 +139,18 @@ class SourceRef(BaseModel):
     block_id: str
 
 
+class ChartSeries(BaseModel):
+    """单个数据系列的图表映射：列名 → 图形类型 → 左右轴。
+
+    ``column`` 在宽表下是指标列名，在长表下是系列名（第 2 列的标签）。
+    前端按 ``chart_series`` 为每个系列设置 ECharts 的 ``type`` / ``yAxisIndex``。
+    """
+
+    column: str
+    type: Literal["bar", "line", "pie"] = "bar"
+    axis: Literal["left", "right"] = "left"
+
+
 class QueryResponse(BaseModel):
     question: str
     kind: Literal["query", "chat"] = "query"
@@ -145,7 +160,16 @@ class QueryResponse(BaseModel):
     rows: list[list] = Field(default_factory=list)
     row_count: int = 0
     truncated: bool = False  # 结果超过 settings.max_result_rows 被截断（explanation 中亦已说明）
+    # 仅会话记忆回放时出现：落库前按 settings.memory_max_rows 截断，这里记原始行数。
+    original_row_count: int | None = None
+    # 主图表类型：取 chart_series[0].type，保留给旧客户端/旧会话做单图降级。
     chart_type: str | None = None
+    # 多系列映射（有序，与指标/系列一一对应）。默认空列表保证旧 Mongo 会话可直接反序列化；
+    # 前端没有该字段时按 chart_type 走旧的单类型渲染。
+    chart_series: list[ChartSeries] = Field(default_factory=list)
+    # 本轮 SQL 实际引用的表（文档源多表定位用：下一轮向量检索无可信命中时沿用它，
+    # 避免同一会话里刚用过的表被判「未定位」而回退全量 schema）。旧会话无此字段。
+    used_tables: list[str] = Field(default_factory=list)
     explanation: str | None = None
     analysis: str | None = None  # 分析说明（答案之外的自然语言分析，可选）
     error: str | None = None

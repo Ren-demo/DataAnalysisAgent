@@ -22,7 +22,7 @@
 | 多数据源适配 | SQLite 上传库 + Excel/CSV 上传 + 非结构化文档 + MySQL/PostgreSQL（静态 `datasources.json` + 前端运行时输入连接存 MongoDB `connections`） |
 | 多表关联查询 | 显式外键 + 命名推断自动识别关联关系，注入 schema 提示供 JOIN |
 | 非结构化文档问答 | .md/.txt/.pdf/.docx 解析，表格入 SQLite、文本向量化入 Milvus 检索回答 |
-| 会话记忆 | MongoDB 记录「问题 + 回答 + 数据源」，历史会话侧栏，刷新保持当前对话 |
+| 会话记忆 | MongoDB 记录「问题 + 回答 + 数据源」，历史会话侧栏，刷新保持当前对话；多表文档的追问在向量定位零候选时沿用上一轮 SQL 实际用过的表 |
 | 决策报告 | LangGraph + `create_agent` 多步下钻产出结构化报告；可选 web_search 联网搜索 + knowledge_search 本地知识库检索 |
 | 自动数据建模（异常检测 / 数据挖掘 / 时序预测） | 线性回归、时序预测（线性/移动平均/复合增长率外推）、异常检测（z-score/IQR）、K-Means 聚类，numpy 手写零新依赖 |
 

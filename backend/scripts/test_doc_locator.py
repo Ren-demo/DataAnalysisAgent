@@ -5,10 +5,10 @@
 1. ``retrieve_doc_scored`` 的阈值语义 —— Milvus 的 metric 是 **L2 距离，越小越相似**，
    故 ``max_distance`` 是**上界**。方向搞反的话，要么把无关表当候选（收窄后确定地用错表），
    要么一张都定位不到（每次回退全量 schema，收窄形同虚设）。
-2. ``_locate_doc_tables`` 的四条出口：题干块 id 精确命中、白名单过滤、**按内容去重**、
-   定位不到返回空。去重这条尤其要紧：文档里同一张表常被复制成多个块（赛题咖啡表 4 份、
-   能源表 5 份），不去重就会把同构表的多个副本一起交给模型，它分别聚合再把结果相加
-   —— 数值直接翻倍，且形态完全正常。
+2. ``_locate_doc_tables`` 的各条出口：题干块 id 精确命中、白名单过滤、**按内容去重**、
+   零候选时**沿用上一轮用过的表**（且可信命中优先）、定位不到返回空。去重这条尤其要紧：
+   文档里同一张表常被复制成多个块（赛题咖啡表 4 份、能源表 5 份），不去重就会把同构表的
+   多个副本一起交给模型，它分别聚合再把结果相加 —— 数值直接翻倍，且形态完全正常。
 3. ``_chunk_header`` 对表格块的「摘录」标注 —— Milvus 里表格块只有前 5 行样本，
    不标注模型就会拿它算计数/合计，报出一个看起来像答案的假统计量。
 
@@ -65,8 +65,10 @@ def _patch_block_map(mapping: dict[str, str]):
     dsvc.get_doc_table_by_block = lambda doc_id, block_id: mapping.get(str(block_id))
 
 
-def _locate(ds: str, question: str, tables: list[str]) -> list[str]:
-    return asyncio.run(_locate_doc_tables(ds, question, tables))
+def _locate(
+    ds: str, question: str, tables: list[str], prior_tables: list[str] | None = None
+) -> list[str]:
+    return asyncio.run(_locate_doc_tables(ds, question, tables, prior_tables=prior_tables))
 
 
 def test_scored_thresholds() -> None:
@@ -165,6 +167,184 @@ def test_locate_doc_tables() -> None:
     _check("命中的表不在白名单 → 空", _locate("doc:dx", "各品类销量？", all_tables) == [])
 
 
+def test_prior_tables_fallback() -> None:
+    """第三级定位：检索零候选时沿用上一轮用过的表；可信命中永远优先。"""
+    all_tables = ["doc_x_0", "doc_x_1", "doc_x_2"]
+
+    # 线上实测形态：最优命中 0.9512 略超 0.95 → 检索零候选
+    _patch_vector_hits([_hit("超级商店表", "b2", 0.9512)])
+    _patch_block_map({"b2": "doc_x_2"})
+    _check(
+        "零候选 + 上文 → 沿用上一轮查询的表",
+        _locate("doc:dx", "统计各个月的营业额", all_tables, prior_tables=["doc_x_1"])
+        == ["doc_x_1"],
+    )
+    _check(
+        "零候选 + 无上文 → 空（既有行为不变）",
+        _locate("doc:dx", "统计各个月的营业额", all_tables) == [],
+    )
+    _check(
+        "上文表不在白名单 → 拒绝",
+        _locate("doc:dx", "统计各个月的营业额", all_tables, prior_tables=["doc_OTHER_0"])
+        == [],
+    )
+
+    # 当轮检索有可信命中（0.88 ≤ 0.95）→ 以检索为准，不被上文带偏（话题切换）
+    _patch_vector_hits([_hit("咖啡表", "b1", 0.88)])
+    _patch_block_map({"b1": "doc_x_0", "b2": "doc_x_2"})
+    _check(
+        "可信命中优先于上文",
+        _locate("doc:dx", "各月营业额", all_tables, prior_tables=["doc_x_1"]) == ["doc_x_0"],
+    )
+
+    # 白名单过滤 + 去重 + 保持原顺序
+    _patch_vector_hits([])
+    _check(
+        "上文去重保序",
+        _locate(
+            "doc:dx",
+            "各月营业额",
+            all_tables,
+            prior_tables=["doc_x_2", "doc_x_0", "doc_x_2", "doc_OTHER_9"],
+        )
+        == ["doc_x_2", "doc_x_0"],
+    )
+
+    # 检索抛异常（Milvus 不可用）时，已确认用过的表仍可续接
+    orig_retrieve = dsvc.retrieve_doc_scored
+
+    def _boom(doc_id, question, top_k=None, **kw):
+        raise RuntimeError("Milvus 不可达")
+
+    dsvc.retrieve_doc_scored = _boom
+    try:
+        _check(
+            "检索异常 + 上文 → 沿用",
+            _locate("doc:dx", "各月营业额", all_tables, prior_tables=["doc_x_1"])
+            == ["doc_x_1"],
+        )
+    finally:
+        dsvc.retrieve_doc_scored = orig_retrieve
+
+
+def test_used_tables_extraction() -> None:
+    """used_tables：从 SQL 解析被引用的表；解析失败返回 []，绝不影响查询执行。"""
+    from app.services.query_service import _extract_used_tables
+
+    class _FakeDialect:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    class _FakeEngine:
+        def __init__(self, name: str) -> None:
+            self.dialect = _FakeDialect(name)
+
+    _check(
+        "SQLite 双引号表名",
+        _extract_used_tables('SELECT * FROM "doc_x_0" LIMIT 5') == ["doc_x_0"],
+    )
+    _check(
+        "JOIN 多表去重保序",
+        _extract_used_tables(
+            'SELECT * FROM "doc_x_0" a JOIN "doc_x_1" b ON a.k = b.k '
+            'JOIN "doc_x_0" c ON c.k = a.k'
+        )
+        == ["doc_x_0", "doc_x_1"],
+    )
+    # 默认方言解析反引号会抛 ParseError，必须按 engine.dialect.name 选方言
+    _check(
+        "MySQL 反引号（按引擎方言解析）",
+        _extract_used_tables("SELECT * FROM `doc_x_0`", _FakeEngine("mysql")) == ["doc_x_0"],
+    )
+    _check("无表 SQL → 空", _extract_used_tables("SELECT 1") == [])
+    _check("非法 SQL → 空（不抛）", _extract_used_tables("SELEC nope") == [])
+    _check("引擎缺失时按默认方言解析", _extract_used_tables('SELECT * FROM "t"') == ["t"])
+
+
+def test_fallback_schema_dedupes() -> None:
+    """定位失败 → 回退全量 schema 时**也必须去重**。
+
+    线上 4× 误差的直接触发条件就是这条回退路径：48 张表的 DDL 原样进 prompt，
+    其中咖啡表有 4 张同构副本，模型 UNION 后聚合。故这里把定位打成「恒返回空」，
+    断言进 ``build_schema_text`` 的表名已经是去重后的结果。
+    """
+    import app.database.engine as eng
+
+    orig = (
+        eng.resolve_table_names,
+        eng.locate_doc_tables,
+        eng.build_schema_text,
+        eng.build_scoped_schema_text,
+        dsvc.dedupe_doc_tables,
+    )
+    calls: list[tuple[list[str], bool]] = []
+    seen_prior: list[list[str] | None] = []
+
+    def _record(engine, names, with_samples=False):
+        calls.append((list(names), with_samples))
+        return "|".join(names)
+
+    def _fake_locate(ds, q, tables, *, prior_tables=None):
+        seen_prior.append(prior_tables)
+        return []
+
+    def _must_not_call(*a, **kw):
+        raise AssertionError("doc 源回退时不应再走 build_scoped_schema_text（会重新取回全部表）")
+
+    try:
+        eng.locate_doc_tables = _fake_locate
+        eng.build_schema_text = _record
+        eng.build_scoped_schema_text = _must_not_call
+
+        # 1) 去重后仍超 schema_max_tables：走不带取值区的全量 DDL
+        eng.resolve_table_names = lambda ds: [f"doc_x_{i}" for i in range(48)]
+        dsvc.dedupe_doc_tables = lambda doc_id, tables: [f"doc_x_{i}" for i in range(23)]
+        got = eng.build_source_schema_text(None, "doc:abcdefabcdef", "各月营业额")
+        _check("回退路径调用 build_schema_text 一次", len(calls) == 1, str(calls))
+        _check("回退路径用的是去重后的 23 张表", len(calls[0][0]) == 23, str(calls[0][0]))
+        _check("表数仍超上限时不附带取值区", calls[0][1] is False, str(calls[0]))
+        _check("schema 文本来自去重后的表", got.startswith("doc_x_0|doc_x_1"), got[:40])
+
+        # 2) 去重后表数有界：附带取值区
+        calls.clear()
+        dsvc.dedupe_doc_tables = lambda doc_id, tables: tables[:3]
+        eng.build_source_schema_text(None, "doc:abcdefabcdef", "各月营业额")
+        _check("表数在 schema_max_tables 内时附带取值区", calls[0][1] is True, str(calls[0]))
+        _check("未给上文时 prior_tables 为 None", seen_prior[-1] is None, str(seen_prior))
+
+        # 2b) 上文续接参数必须透传到定位函数（graph._prepare_query_node 靠它续接）
+        calls.clear()
+        eng.build_source_schema_text(
+            None, "doc:abcdefabcdef", "各月营业额", prior_tables=["doc_x_1"]
+        )
+        _check("prior_tables 透传到定位函数", seen_prior[-1] == ["doc_x_1"], str(seen_prior))
+
+        # 3) 按块寻址（doc:<id>:<块id>）：只解析出一张表，不能参与「副本去重」——
+        #    历史文档里该块若恰好是副本，会被判成非首张而剔除，schema 直接变空。
+        calls.clear()
+        eng.resolve_table_names = lambda ds: ["doc_x_1"]
+        dsvc.dedupe_doc_tables = lambda doc_id, tables: []  # 一旦被调用就会清空 schema
+        got = eng.build_source_schema_text(None, "doc:abcdefabcdef:blk1", "")
+        _check("按块寻址时不做副本去重", got == "doc_x_1", got)
+
+        # 4) 非 doc 源不受影响：表数超上限时仍走 build_scoped_schema_text
+        #    （表数在上限内的源本来就走 build_schema_text，与去重无关）
+        calls.clear()
+        eng.resolve_table_names = lambda ds: [f"t{i}" for i in range(10)]
+        eng.build_scoped_schema_text = lambda engine, ds: "SCOPED"
+        got = eng.build_source_schema_text(None, "upload:abc", "")
+        _check("非 doc 源仍走 build_scoped_schema_text", got == "SCOPED", got)
+        _check("非 doc 源不调用 build_schema_text", calls == [], str(calls))
+    finally:
+        (
+            eng.resolve_table_names,
+            eng.locate_doc_tables,
+            eng.build_schema_text,
+            eng.build_scoped_schema_text,
+            dsvc.dedupe_doc_tables,
+        ) = orig
+
+
 def test_chunk_header() -> None:
     """表格块必须带「摘录」标注；正文块不带。"""
     text_head = _chunk_header({"title": "报告A", "block_id": "b1", "kind": "text"})
@@ -187,6 +367,9 @@ def test_chunk_header() -> None:
 def main() -> None:
     test_scored_thresholds()
     test_locate_doc_tables()
+    test_prior_tables_fallback()
+    test_used_tables_extraction()
+    test_fallback_schema_dedupes()
     test_chunk_header()
     print("\n全部通过 ✓")
 

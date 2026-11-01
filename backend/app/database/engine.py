@@ -208,7 +208,13 @@ def extract_block_id(question: str, doc_id: str | None = None) -> str | None:
     return None
 
 
-def locate_doc_tables(data_source_id: str, question: str, table_names: list[str]) -> list[str]:
+def locate_doc_tables(
+    data_source_id: str,
+    question: str,
+    table_names: list[str],
+    *,
+    prior_tables: list[str] | None = None,
+) -> list[str]:
     """文档源：把问句定位到该文档提取出的具体表格，返回真实表名列表（定位不到返回空）。
 
     文档常被提取成几十到几百张表（赛题 Multi-step 是 48 张、Table_Query 是 500 张）。
@@ -216,12 +222,20 @@ def locate_doc_tables(data_source_id: str, question: str, table_names: list[str]
     （真实表名是 ``doc_<doc_id>_<idx>``）无从选择，text2sql 与统计算子都必然选错表 ——
     这是文档问答答不准的头号原因，收窄后 prompt 只剩候选表。
 
-    两级定位，精确优先：
+    三级定位，精确优先：
 
     1. 题干直接带块 id（``extract_block_id``，如「=== 3430815b5ad7 ===」或确实
        对应本文档某表格的十六进制串）→ 直接映射到该块的表；
     2. 否则用向量检索召回 top-k 块，把其中的**表格块**映射回表名（正文块天然
-       映射不到表，跳过即可）。
+       映射不到表，跳过即可）；
+    3. 前两级都没产出候选表时，**沿用同一会话上一轮 SQL 实际用过的表**
+       （``prior_tables``，经本数据源表名白名单过滤）。
+
+    第 3 级只在前两级「零候选」时生效，因此不会把话题切换带偏：换表提问只要
+    向量检索有可信命中就走第 2 级。它解决的是另一种真实故障——多表文档里紧随
+    上一轮追问（如先「展示所有数据」再「按月份汇总」），问句本身不含表名、向量
+    检索又因同构表格互相干扰而全部落在阈值外侧，于是刚用过的表被判「未定位」、
+    schema 回退全量 23 张表。
 
     返回空表示「没能定位」，由调用方回退全量 schema —— 最坏情况不劣于改造前，
     不阻断主链路（与项目「查询链路不设规则兜底」的降级口径一致）。
@@ -251,9 +265,13 @@ def locate_doc_tables(data_source_id: str, question: str, table_names: list[str]
     try:
         chunks = retrieve_doc_scored(doc_id, question, settings.doc_top_k)
     except Exception:
-        # Milvus / embedding 不可用：定位不了就交给调用方回退全量，不让整条查询挂掉
-        logger.warning("文档块定位检索失败，将回退全量表结构：%s", data_source_id, exc_info=True)
-        return []
+        # Milvus / embedding 不可用：仍有上文可续接时走第三级，否则交给调用方回退全量
+        logger.warning(
+            "文档块定位检索失败，将尝试上文续接或回退全量表结构：%s",
+            data_source_id,
+            exc_info=True,
+        )
+        chunks = []
 
     located: list[str] = []
     seen: set[str] = set()
@@ -269,7 +287,21 @@ def locate_doc_tables(data_source_id: str, question: str, table_names: list[str]
         if t and t in allowed and t not in located:
             located.append(t)
             seen.add(content)  # 只在确实映射到表时记账，正文块不占用去重集合
-    return located
+    if located:
+        return located
+
+    # 第三级：上文续接。只在向量检索零候选时兜底，白名单过滤掉别处带进来的表名。
+    reuse: list[str] = []
+    for t in prior_tables or []:
+        if t in allowed and t not in reuse:
+            reuse.append(t)
+    if reuse:
+        logger.info(
+            "文档 %s 的表格定位：向量检索无可信命中，沿用上一轮查询使用的表 %s。",
+            data_source_id,
+            reuse,
+        )
+    return reuse
 
 
 # 外部数据源的缓存键前缀：upload / doc 用固定键 "uploads" / "docs"，
@@ -567,7 +599,13 @@ def build_scoped_schema_text(engine: Engine, data_source_id: str) -> str:
     return build_schema_text(engine, only_tables=only)
 
 
-def build_source_schema_text(engine: Engine, data_source_id: str, question: str = "") -> str:
+def build_source_schema_text(
+    engine: Engine,
+    data_source_id: str,
+    question: str = "",
+    *,
+    prior_tables: list[str] | None = None,
+) -> str:
     """按数据源产出**送进 text2sql 的 schema 文本**（全链路唯一入口）。
 
     与 ``build_scoped_schema_text`` 的区别有两处，都是「让模型看得见数据」：
@@ -579,12 +617,16 @@ def build_source_schema_text(engine: Engine, data_source_id: str, question: str 
     2. **表数有界时附带取值区**：见 ``build_schema_text`` 的 ``with_samples``。
 
     ``question`` 只在 doc 源定位时用到；非 doc 源传空串即可。
+    ``prior_tables`` 是同一会话上一轮 SQL 实际用过的表，仅在向量检索零候选时由
+    ``locate_doc_tables`` 兜底沿用（见其第三级定位）。
     """
     schema_text: str | None = None
     if data_source_id.startswith("doc:"):
         table_names = resolve_table_names(data_source_id)
         if len(table_names) > 1:
-            located = locate_doc_tables(data_source_id, question, table_names)
+            located = locate_doc_tables(
+                data_source_id, question, table_names, prior_tables=prior_tables
+            )
             if located:
                 schema_text = build_schema_text(engine, located, with_samples=True)
             else:
@@ -599,11 +641,28 @@ def build_source_schema_text(engine: Engine, data_source_id: str, question: str 
 
     if schema_text is None:
         owned = resolve_table_names(data_source_id)
+        is_doc = data_source_id.startswith("doc:")
+        if is_doc:
+            # 回退全量时**必须再去重一次**：文档常把同一张表复制成多个块（赛题 Multi-step
+            # 的咖啡表 4 连、能源表 5 连），历史文档在库里就是多张同构表。一起交给模型，
+            # 它会分别聚合再把结果相加 —— 营业额/客单数直接翻 4 倍且形态完全正常。
+            # 定位成功的那条路径由 ``locate_doc_tables`` 按内容去重，这里兜住回退路径。
+            from app.services.document_service import dedupe_doc_tables
+
+            doc_id, addressed_table = parse_doc_id(data_source_id)
+            # 按块寻址（doc:<id>:<块id>）只解析出一张表，**不能去重**：历史文档里若该块
+            # 恰好是副本，它会被判成「非首张」而剔除，schema 直接变空。
+            if doc_id and addressed_table is None:
+                owned = dedupe_doc_tables(doc_id, owned)
         # 回退全量（doc 源数百张表）**刻意不带取值区**：239 张表各带样本实测多出
         # 约 7.9 万字符（DDL 本身 3.9 万），prompt 直接翻三倍；而块 id / 向量定位
         # 已能覆盖绝大多数情况，回退路径带取值的收益远小于 prompt 爆炸的代价。
         if owned and len(owned) <= settings.schema_max_tables:
             schema_text = build_schema_text(engine, owned, with_samples=True)
+        elif is_doc:
+            # doc 源已在上方去重：不能再走 build_scoped_schema_text，
+            # 它会重新 resolve_table_names 取回全部表，把去重结果绕过去。
+            schema_text = build_schema_text(engine, owned)
         else:
             schema_text = build_scoped_schema_text(engine, data_source_id)
     return schema_text

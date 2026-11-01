@@ -16,7 +16,8 @@ class OrchestratorState(TypedDict, total=False):
     history: list[ChatMessage]
     intent: str                 # "query" | "chat" | "redraw" | "retrieval" | "analysis" | "schema"
     data_source_type: str | None  # "upload" | "doc" | "mysql" | "postgresql"
-    chart_hint: str | None      # "bar" | "line" | "pie" | None
+    chart_hint: str | None      # 主类型 "bar" | "line" | "pie" | None（兼容旧链路）
+    chart_hints: list[str]      # 显式请求的全部类型，按指标列顺序，如 ["bar", "line"]
     want_sql: bool              # 用户是否明确要求输出/展示 SQL 语句
     answer_format: str | None   # "list" | "json" | "single" | None，用户要求/隐含的输出格式
     session_id: str | None      # 会话 id（重绘图表复用记忆数据用）

@@ -56,15 +56,24 @@ def _trim_result(result: dict[str, Any]) -> dict[str, Any]:
     只留前 ``settings.memory_max_rows`` 行，并把 ``row_count`` 同步改为保留行数
     （全链路不变式是 ``row_count == len(rows)``，前端表格与图表都据此渲染），
     同时置 ``truncated=True`` 让历史恢复时能看出被截断过。
+
+    ``original_row_count`` 与 ``explanation`` 的补注是**一致性**要求，不是装饰：
+    早前只改了 ``rows`` / ``row_count`` / ``truncated``，explanation 里那句
+    「已返回全量 896 行」原样留着，历史回放时三者自相矛盾，用户会以为系统算错了数。
     """
     limit = settings.memory_max_rows
     rows = result.get("rows") or []
     if limit <= 0 or len(rows) <= limit:
         return result
+    original = int(result.get("row_count") or len(rows))
     trimmed = dict(result)
     trimmed["rows"] = rows[:limit]
     trimmed["row_count"] = limit
     trimmed["truncated"] = True
+    trimmed["original_row_count"] = original
+    note = f"（历史记录仅保留前 {limit} 行，原始结果 {original} 行）"
+    explanation = str(trimmed.get("explanation") or "").strip()
+    trimmed["explanation"] = f"{explanation}{note}" if explanation else note
     return trimmed
 
 
@@ -100,14 +109,12 @@ async def record_turn(
         return None
 
     kind = result.get("kind") or "query"
-    answer = result.get("answer") if kind == "chat" else result.get("explanation")
 
     now = _now()
     message_id = str(uuid.uuid4())
     user_msg: dict[str, Any] = {"role": "user", "content": question, "created_at": now}
     assistant_msg: dict[str, Any] = {
         "role": "assistant",
-        "content": answer or "",
         "kind": kind,
         "data_source_id": data_source_id,
         "message_id": message_id,
@@ -115,11 +122,17 @@ async def record_turn(
     }
     if kind == "query":
         assistant_msg["sql"] = result.get("sql")
-        # 截断后再落库：全量 rows 经 $push 累积会撑爆 16MB 文档上限（见 _trim_result）
-        assistant_msg["result"] = _trim_result(result)
-    elif result.get("sources"):
-        # chat（含 RAG 检索）结果：持久化出处引用，供历史会话恢复展示
-        assistant_msg["sources"] = result.get("sources")
+        # 截断后再落库：全量 rows 经 $push 累积会撑爆 16MB 文档上限（见 _trim_result）。
+        # content 必须取**截断后**的 explanation：取原值会让正文写着「已返回全量 896 行」
+        # 而同一条消息的 result 只有 200 行，历史回放时自相矛盾。
+        trimmed = _trim_result(result)
+        assistant_msg["result"] = trimmed
+        assistant_msg["content"] = trimmed.get("explanation") or ""
+    else:
+        assistant_msg["content"] = result.get("answer") or ""
+        if result.get("sources"):
+            # chat（含 RAG 检索）结果：持久化出处引用，供历史会话恢复展示
+            assistant_msg["sources"] = result.get("sources")
 
     update = {
         "$setOnInsert": {"created_at": now},
@@ -251,11 +264,22 @@ async def save_summary_state(
         return False
 
 
-async def get_last_query_result(session_id: str | None) -> dict[str, Any] | None:
+async def get_last_query_result(
+    session_id: str | None,
+    *,
+    data_source_id: str | None = None,
+) -> dict[str, Any] | None:
     """返回会话最近一次数据查询的结构化结果（columns/rows 等）；无则 None。
 
-    供「重绘图表」复用：从后往前找最近一条带非空 columns/rows 的 assistant 消息
-    （query 与重绘结果二者数据一致，均可复用）。失败静默返回 None。
+    供两处复用：
+
+    - 「重绘图表」：从后往前找最近一条带非空 columns/rows 的 assistant 消息
+      （query 与重绘结果二者数据一致，均可复用）；
+    - 文档表格定位的上文续接：传 ``data_source_id`` 时只认该数据源的结果，
+      避免在 A 文档问完切到 B 文档后，把 A 的表名带进 B（表名白名单之外，
+      但同名的外部库表会被误收窄）。
+
+    失败静默返回 None。
     """
     if not session_id:
         return None
@@ -268,6 +292,8 @@ async def get_last_query_result(session_id: str | None) -> dict[str, Any] | None
             return None
         for m in reversed(doc.get("messages") or []):
             if m.get("role") != "assistant":
+                continue
+            if data_source_id is not None and m.get("data_source_id") != data_source_id:
                 continue
             result = m.get("result")
             if isinstance(result, dict) and result.get("columns") and result.get("rows"):

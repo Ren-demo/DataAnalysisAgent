@@ -304,7 +304,7 @@ curl -N -X POST http://localhost:8000/api/chat/stream \
 
 | 事件 | 载荷 | 含义 |
 | --- | --- | --- |
-| `intent` | `intent`、`chart_hint` | 意图分类结果（等待文案） |
+| `intent` | `intent`、`chart_hint`、`chart_hints` | 意图分类结果（等待文案）；`chart_hints` 为按指标顺序排列的多种图表类型 |
 | `sql_token` | `content` | SQL 片段，仅用户明确要求输出 SQL 时发 |
 | `answer_token` | `content` | 闲聊 / 检索回答的流式片段 |
 | `progress` | `scope`、`text` | agent 工具调用进度 |
@@ -358,17 +358,19 @@ schema 文本的唯一入口是 `engine.build_source_schema_text`，三条查询
 
 #### 多表收窄
 
-文档源下 `doc:<id>` 会解析出该文档提取出的全部表格（赛题 `Table_Query` 500 张、`Multi-step` 48 张），直接交给模型等于让它盲选。定位按两级收窄：
+文档源下 `doc:<id>` 会解析出该文档提取出的全部表格（赛题 `Table_Query` 500 张、`Multi-step` 48 张），直接交给模型等于让它盲选。定位按三级收窄，精确优先：
 
 1. 题干块 id（`engine.extract_block_id`，精确）→ 直接映射到该块的表；
-2. 否则用向量检索召回 top-k 块，把其中的表格块映射回表名。
+2. 否则用向量检索召回 top-k 块，把其中的表格块映射回表名；
+3. 前两级都零候选时，**沿用同一会话上一轮 SQL 实际用过的表**（`QueryResponse.used_tables` 落库，`graph._prepare_query_node` 读出后经 `prior_tables` 传入），同样受表名白名单约束。
 
 约束：
 
 - 召回走 `document_service.retrieve_doc_scored`，按 L2 距离阈值过滤（`doc_table_max_distance`）。最优命中都超阈值就判「没定位到」，只保留不差于「最优 + `doc_table_score_margin`」的命中。
+- 第 3 级**只在第 2 级零候选时生效**，检索有可信命中永远以当轮为准，因此话题切换不会被上一轮带偏；它解决的是另一类真实故障——多表文档里的追问（先「展示所有数据」、再「按月份汇总」）不含表名，同构表格互相干扰使整批命中落在阈值外侧，刚用过的表被判「未定位」而回退全量 23 张表。实测该问句最优命中 0.9512（超级商店表，**不是**上一轮用的咖啡表），所以**不能**靠放宽阈值解决。
 - 命中块映射到真实表名后按内容去重。同一张表常被复制成多个块（赛题咖啡表 4 份、能源表 5 份，内容逐字相同）；不去重会把同构表的多个副本一起交给模型，它分别聚合再相加，数值直接翻倍且形态完全正常。
-- 只认本数据源的表（`table_names` 白名单），防跨文档读数。
-- 定位不到就回退全量 schema，并打 `logger.info`。收窄方向是会反转的风险：不定位的最坏情况是「模型可能选错」，定位错则确定错，故宁可回退不可猜测。
+- 只认本数据源的表（`table_names` 白名单），防跨文档读数（`prior_tables` 同样过白名单，且 `get_last_query_result` 按 `data_source_id` 过滤，不会跨数据源续接）。
+- 三者都定位不到就回退全量 schema，并打 `logger.info`。收窄方向是会反转的风险：不定位的最坏情况是「模型可能选错」，定位错则确定错，故宁可回退不可猜测。第 3 级的依据不是猜测，而是本会话中已经实际执行成功过的 SQL。
 
 > ⚠️ 阈值是上界：Milvus metric 是 L2 距离，越小越相似。默认 `0.95` / `0.10` 由 `text-embedding-v4` 在赛题 `Multi-step` 数据上实测标定（真命中 0.87，语义无关 0.98~1.03，完全无关 1.43）。换 `EMBEDDING_MODEL` 必须重新标定。
 
@@ -454,6 +456,13 @@ text2sql 的 system prompt 配套要求：WHERE / HAVING 的取值必须来自 s
 
 仅当用户显式指定柱状图 / 折线图 / 饼图时才返回对应 `chart_type`（bar / line / pie），否则一律 `table`，不做自动推断出图。仅说「可视化 / 画图」而不指定类型，同样返回 `table`。
 
+用户一次要求多种类型时（如「分别绘制柱状图和折线图」），`chart_hints` 按**指标列顺序**保留全部类型，例如 `["bar", "line"]`，并写入 `QueryResponse.chart_series`（每项含 `column` / `type` / `axis`）：
+
+- 第 i 个类型对应第 i 个指标；指标多于类型时，多出的指标跟随最后一个类型；类型多于指标时忽略多余类型；
+- `bar` 与 `line` 同时存在时，`line` 系列挂**右轴**（营业额与客单数量级相差较大，共用一轴会把小的压平）；
+- 饼图独占，与其它类型混用时丢弃 `pie`，其余类型继续组合；
+- `chart_type` 仍取第一个类型，旧客户端/旧会话可降级为单图渲染。
+
 ### 输出格式（列表 / JSON / 单答案）
 
 当用户明确要求以列表 / JSON 形式返回答案（如「返回列表」「只返回名称」「以 JSON 返回」），或问题隐含「哪些 / 哪类 / 哪几种…」时，后端把 `QueryResponse.explanation` 渲染为纯列表字符串（如 `['Latte', 'Americano with Milk']`，无匹配为 `[]`；JSON 格式为 `["Latte", ...]`），同时保留明细表格。
@@ -473,7 +482,7 @@ text2sql 的 system prompt 配套要求：WHERE / HAVING 的取值必须来自 s
 
 | 节点 | 作用 |
 | --- | --- |
-| `classify` | 意图分类，写 `intent` / `chart_hint` / `want_sql` / `answer_format` |
+| `classify` | 意图分类，写 `intent` / `chart_hint` / `chart_hints` / `want_sql` / `answer_format` |
 | `prepare_query` | 解析数据源，生成 schema 文本（query 与 analysis 的共同前置） |
 | `text2sql` | 流式生成 SQL，按需发 `sql_token` |
 | `execute` | 执行 SQL，渲染结果与回答 |

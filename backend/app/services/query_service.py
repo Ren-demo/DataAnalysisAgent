@@ -10,6 +10,8 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import sqlglot
+from sqlglot import exp
 from sqlalchemy import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -22,7 +24,7 @@ from app.database.engine import (
 from app.errors import AppError
 from app.llm.text2sql import generate_sql
 from app.schemas import QueryResponse
-from app.services.chart_service import suggest_chart_type
+from app.services.chart_service import suggest_chart_series
 
 logger = logging.getLogger(__name__)
 
@@ -54,11 +56,23 @@ def _to_json_safe(value: Any) -> Any:
     return str(value)
 
 
+def truncation_note(row_count: int, truncated: bool) -> str:
+    """截断提示文案；未截断时为空串。
+
+    单独抽出来是因为 ``_execute_node`` 会用 LLM 生成的分析文案替换 explanation：
+    若不带这条尾巴，「结果超过 200 行，仅显示前 200 行」就被冲掉，正文反而会说
+    「已返回全量数据」——与 ``rows`` / ``row_count`` 直接矛盾。
+    """
+    if not truncated:
+        return ""
+    return f"（结果超过 {settings.max_result_rows} 行，仅显示前 {row_count} 行，请缩小范围）"
+
+
 def _build_explanation(row_count: int, include_sql: bool = False, truncated: bool = False) -> str:
     """规则生成结果说明（默认不提及 SQL，仅在要求展示 SQL 时说明）。"""
     if row_count == 0:
         return "未查到匹配数据，请调整提问。"
-    tail = "" if not truncated else f"（结果超过 {settings.max_result_rows} 行，仅显示前 {row_count} 行，请缩小范围）"
+    tail = truncation_note(row_count, truncated)
     if include_sql:
         return f"已生成并执行 SQL，共返回 {row_count} 条结果。{tail}".rstrip()
     return f"共返回 {row_count} 条结果。{tail}".rstrip()
@@ -98,16 +112,47 @@ def _error_response(question: str, error: str, error_code: str) -> QueryResponse
     )
 
 
+# SQLAlchemy 的 ``engine.dialect.name`` → sqlglot 方言名。SQLite 用 sqlglot 默认方言即可；
+# MySQL 的反引号在默认方言下会直接抛 ParseError，必须显式指定（已实测）。
+_SQLGLOT_DIALECT = {"mysql": "mysql", "postgresql": "postgres"}
+
+
+def _extract_used_tables(sql: str, engine: Engine | None = None) -> list[str]:
+    """从 SQL 中提取被引用的表名（去重保序）；解析失败返回 []。
+
+    只用于文档源多表定位的上文续接，**绝不能影响查询本身**：任何解析异常都吞掉。
+    CTE 别名的定义不会被 ``exp.Table`` 收录，但 ``FROM cte_alias`` 会被查出来，
+    由下游 ``locate_doc_tables`` 的表名白名单过滤掉。
+    """
+    dialect = _SQLGLOT_DIALECT.get(
+        str(getattr(getattr(engine, "dialect", None), "name", "") or "")
+    )
+    try:
+        tree = sqlglot.parse_one(sql, read=dialect)
+    except Exception:
+        return []
+    names: list[str] = []
+    for t in tree.find_all(exp.Table):
+        name = t.name
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
 def execute_sql(
     question: str,
     sql: str,
     engine: Engine,
     chart_hint: str | None = None,
     include_sql: bool = False,
+    *,
+    chart_hints: list[str] | None = None,
 ) -> QueryResponse:
     """执行 SQL 并构建结构化结果（不含 SQL 生成，供流式与非流式共用）。
 
     ``include_sql`` 控制结果是否携带 SQL 语句：默认 False（仅当用户明确要求输出 SQL 时置 True）。
+    ``chart_hints`` 是**多类型**入口（keyword-only，避免破坏既有位置参数调用）；
+    它优先于单值 ``chart_hint``，为空时退回 ``chart_hint``。
     """
     try:
         df, truncated = _read_frame_limited(sql, engine, settings.max_result_rows)
@@ -127,7 +172,8 @@ def execute_sql(
         for row in df.itertuples(index=False, name=None)
     ]
     row_count = len(rows)
-    chart_type = suggest_chart_type(columns, rows, question, chart_hint)
+    hints = chart_hints or ([chart_hint] if chart_hint else [])
+    chart_type, chart_series = suggest_chart_series(columns, rows, hints)
     explanation = _build_explanation(row_count, include_sql, truncated)
 
     return QueryResponse(
@@ -137,6 +183,8 @@ def execute_sql(
         rows=rows,
         row_count=row_count,
         chart_type=chart_type,
+        chart_series=chart_series,
+        used_tables=_extract_used_tables(sql, engine),
         explanation=explanation,
         truncated=truncated,
         error=None,
@@ -149,6 +197,8 @@ def run_query(
     data_source_id: str = "",
     chart_hint: str | None = None,
     include_sql: bool = False,
+    *,
+    chart_hints: list[str] | None = None,
 ) -> QueryResponse:
     """执行一次自然语言查询，返回结构化结果与图表类型（默认不携带 SQL）。"""
     try:
@@ -161,7 +211,14 @@ def run_query(
         # 纯同步上下文，直接调用即可（图内那条才需要 asyncio.to_thread）。
         schema_text = build_source_schema_text(engine, data_source_id, question)
         sql = generate_sql(question, schema_text, dialect)
-        return execute_sql(question, sql, engine, chart_hint, include_sql=include_sql)
+        return execute_sql(
+            question,
+            sql,
+            engine,
+            chart_hint,
+            include_sql=include_sql,
+            chart_hints=chart_hints,
+        )
     except AppError as e:
         return _error_response(question, e.message, e.error_code)
     except SQLAlchemyError:

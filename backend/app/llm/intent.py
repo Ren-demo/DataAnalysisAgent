@@ -4,14 +4,15 @@
 （查询是核心链路，且已有完整的 SQL 校验与错误兜底）。
 
 图表触发采用严格模式：查询链路中仅当用户明确说出图表类型（柱状图/饼图/折线图等）时才出图，
-仅说「可视化/画图」而不指定类型，一律返回 table（不出图）。重绘（redraw）分支复用已有结果，
-未指定类型时默认柱状图。
+仅说「可视化/画图」而不指定类型，一律返回 table（不出图）。一次要求多种类型时，
+``chart_hints`` 按指标顺序保留全部类型（如 "分别绘制柱状图和折线图" → ["bar", "line"]）。
+重绘（redraw）分支复用已有结果，未指定类型时默认柱状图。
 """
 import json
 import re
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.llm.client import get_llm
 from app.schemas import ChatMessage
@@ -29,10 +30,33 @@ class IntentResult(BaseModel):
     """意图分类结果。"""
 
     intent: Literal["query", "chat", "redraw", "retrieval", "analysis", "schema"]
-    chart_hint: str | None = None  # "bar" | "line" | "pie" | None，仅显式指定图表类型时非空
+    # 主图表类型（兼容旧代码/旧测试）：等于 chart_hints 的首项，仅显式指定时非空
+    chart_hint: str | None = None
+    # 用户显式请求的**全部**图表类型，按指标列顺序排列，如 ["bar", "line"]。
+    # 「分别绘制柱状图和折线图」必须两者都保留，否则第二种类型在从严模式下被静默丢弃。
+    chart_hints: list[str] = Field(default_factory=list)
     want_sql: bool = False  # 用户是否明确要求输出/展示 SQL 语句（默认不展示）
     answer_format: Literal["list", "json", "single"] | None = None  # 用户要求/隐含的输出格式（列表/JSON/单答案）
     schema_question: SchemaQuestion | None = None  # 表结构/列名咨询（走确定性 schema 回答）
+
+    @field_validator("chart_hint", mode="before")
+    @classmethod
+    def _normalize_one(cls, v):
+        return _normalize_chart_hint(v)
+
+    @field_validator("chart_hints", mode="before")
+    @classmethod
+    def _normalize_many(cls, v):
+        return _normalize_chart_hints(v)
+
+    @model_validator(mode="after")
+    def _sync_hint(self):
+        """两个字段双向同步：以 chart_hints 为准，旧构造方式（只传 chart_hint）照常可用。"""
+        if self.chart_hints:
+            self.chart_hint = self.chart_hints[0]
+        elif self.chart_hint:
+            self.chart_hints = [self.chart_hint]
+        return self
 
 
 _SYSTEM_PROMPT = (
@@ -45,11 +69,14 @@ _SYSTEM_PROMPT = (
     "4. `redraw`：用户要求把已有（本会话上一步）的查询结果绘制或重绘成图表，"
     "例如「画成柱状图」「换成饼图」「用折线图展示」「重绘图表」，此时不需要再查询数据库。\n"
     "\n"
-    "同时判断 `chart_hint`：\n"
-    "- 仅当用户明确说出图表类型（如「柱状图」「条形图」「饼图」「折线图」「趋势图」）时，"
-    "对应填 `bar` / `line` / `pie` 之一；\n"
-    "- 仅说「图表」「可视化」「画图」但未指定具体类型时，填 null；\n"
-    "- 其它情况一律填 null。\n"
+    "同时判断 `chart_hints`（数组，可为空）：\n"
+    "- 仅当用户明确说出图表类型（如「柱状图」「条形图」「饼图」「折线图」）时填写，"
+    "对应 `bar` / `line` / `pie`；\n"
+    "- 用户一次要求多种图时**全部列出**，按**对应指标在结果中的先后顺序**排列，"
+    "例如「营业额用柱状图、客单数用折线图」→ [\"bar\", \"line\"]；\n"
+    "- 同一类型只出现一次；\n"
+    "- 仅说「图表」「可视化」「画图」但未指定具体类型时，填 []；\n"
+    "- 其它情况一律填 []。\n"
     "\n"
     "同时判断 `want_sql`：\n"
     "- 仅当用户明确要求输出/展示 SQL 语句（如「输出 SQL」「显示 SQL」「给我 SQL 语句」"
@@ -57,7 +84,7 @@ _SYSTEM_PROMPT = (
     "- 仅询问数据结果、要求图表、或普通闲聊，一律填 false。\n"
     "\n"
     "只输出一个 JSON 对象，不要任何多余文字，格式严格如下：\n"
-    '{"intent": "query", "chart_hint": null, "want_sql": false}'
+    '{"intent": "query", "chart_hints": [], "want_sql": false}'
 )
 
 # 关键词兜底用
@@ -235,6 +262,51 @@ def _normalize_chart_hint(hint) -> str | None:
     return None
 
 
+# 多类型可能以数组或「bar,line」「柱状图和折线图」这类分隔串出现
+_HINT_SEP_RE = re.compile(r"[,，、;；/|+\s和与及]+")
+
+
+def _normalize_chart_hints(value) -> list[str]:
+    """把 LLM/规则给出的多类型统一为去重保序的 bar/line/pie 列表。
+
+    接受 ``None`` / 单个值 / 列表 / 分隔字符串；非法值直接丢弃。
+    兼容旧模型输出：调用方仍可把旧 ``chart_hint`` 单值传进来。
+    """
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        items: list = list(value)
+    else:
+        items = _HINT_SEP_RE.split(str(value))
+    out: list[str] = []
+    for item in items:
+        hint = _normalize_chart_hint(item)
+        if hint and hint not in out:
+            out.append(hint)
+    return out
+
+
+def _detect_chart_hints(question: str) -> list[str]:
+    """按图表类型在句中**首次出现的位置**收集并去重。
+
+    早前这里遍历 ``_CHART_HINT_MAP`` 命中即 ``break``，于是「柱状图和折线图」
+    永远只取到 ``bar``，第二种类型被静默丢弃。类型必须按用户表述的先后顺序保留，
+    才能与结果列的先后顺序一一对应。
+    """
+    q = question or ""
+    hits: list[tuple[int, str]] = []
+    for word, typ in _CHART_HINT_MAP.items():
+        pos = q.find(word)
+        while pos != -1:
+            hits.append((pos, typ))
+            pos = q.find(word, pos + len(word))
+    out: list[str] = []
+    for _, typ in sorted(hits, key=lambda x: x[0]):
+        if typ not in out:
+            out.append(typ)
+    return out
+
+
 def _rule_fallback(question: str) -> IntentResult:
     """关键词规则兜底：明显闲聊/元数据咨询 → chat；纯图表/重绘表达 → redraw；
     复杂统计建模（相关性/环比/同比等）→ analysis；其余 → query。"""
@@ -248,23 +320,19 @@ def _rule_fallback(question: str) -> IntentResult:
     ):
         return IntentResult(intent="chat")
 
-    hint = None
-    for word, typ in _CHART_HINT_MAP.items():
-        if word in q:
-            hint = typ
-            break
+    hints = _detect_chart_hints(q)
 
     # 重绘：仅出现图表/绘图类表达、且无数据查询意图 → 复用已有结果出图
-    if (hint is not None or any(w in q for w in _REDRAW_WORDS)) and not any(
+    if (hints or any(w in q for w in _REDRAW_WORDS)) and not any(
         w in q for w in _QUERY_WORDS
     ):
-        return IntentResult(intent="redraw", chart_hint=hint)
+        return IntentResult(intent="redraw", chart_hints=hints)
 
     # 复杂统计建模：命中相关性/环比/同比等词 → 走 pandas 计算兜底（而非单条 SQL）
     if any(w in q for w in _ANALYSIS_WORDS):
         return IntentResult(intent="analysis", want_sql=want_sql)
 
-    return IntentResult(intent="query", chart_hint=hint, want_sql=want_sql)
+    return IntentResult(intent="query", chart_hints=hints, want_sql=want_sql)
 
 
 def _is_doc_body_question(question: str) -> bool:
@@ -448,22 +516,35 @@ def classify_intent(
         intent = data.get("intent")
         if intent not in ("query", "chat", "redraw", "analysis"):
             intent = "query"
+        # 新格式读 chart_hints 数组；模型仍按旧格式回 chart_hint 单值时也能接住
+        hints = _normalize_chart_hints(data.get("chart_hints"))
+        if not hints:
+            hints = _normalize_chart_hints(data.get("chart_hint"))
         result = IntentResult(
             intent=intent,
-            chart_hint=_normalize_chart_hint(data.get("chart_hint")),
+            chart_hints=hints,
             want_sql=bool(data.get("want_sql")),
         )
     except Exception:
         # 2) 规则兜底
         result = _rule_fallback(question)
 
-    # 3) schema 问句优先：表结构/列名咨询需确定性回答，优先于 chat/query 与 doc-retrieval
+    # 3) 图表类型规则兜底：LLM 已给出类型时以它为准；为空而问句里**显式**出现了
+    #    「柱状图/折线图/饼图」时补一次。线上实际故障：模型对「分别绘制柱状图和折线图」
+    #    返回 null，整句退回 table。只认显式类型词——「画个图」仍然不出图，严格模式不破。
+    if not result.chart_hints:
+        hints = _detect_chart_hints(question)
+        if hints:
+            result.chart_hints = hints
+            result.chart_hint = hints[0]
+
+    # 4) schema 问句优先：表结构/列名咨询需确定性回答，优先于 chat/query 与 doc-retrieval
     sq = detect_schema_question(question)
     if sq is not None and result.intent != "redraw":
         result.intent = "schema"
         result.schema_question = sq
 
-    # 4) 文档数据源：指向文档正文的问句在 query/chat 之上改判为 retrieval
+    # 5) 文档数据源：指向文档正文的问句在 query/chat 之上改判为 retrieval
     #    就地改判（函数内部自查意图），chart_hint / want_sql / answer_format 原样带走。
     if data_source_type == "doc":
         _route_doc_intent(question, result)

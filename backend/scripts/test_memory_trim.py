@@ -62,14 +62,43 @@ def main() -> None:
     _check("截断后置 truncated=True", trimmed["truncated"] is True)
     _check("截断保留前 N 行（顺序不变）", trimmed["rows"][0] == [0, 0] and trimmed["rows"][-1] == [limit - 1, (limit - 1) * 2])
 
-    # 4) 不改动入参（原 dict 不被就地修改）
+    # 4) 一个都不能少的「一致性三件套」：行数、原始行数、正文说明必须互相自洽。
+    #    线上事故：「给我查看全量数据」实返 896 行，落库后 rows 变 200、row_count 变 200、
+    #    truncated=True，而 explanation 仍写着「已返回全量 896 行」——历史回放自相矛盾。
+    _check(
+        "截断后记下原始行数",
+        trimmed["original_row_count"] == limit + 500,
+        str(trimmed.get("original_row_count")),
+    )
+    _check(
+        "explanation 补注了「历史记录仅保留前 N 行」",
+        f"仅保留前 {limit} 行" in trimmed["explanation"]
+        and f"原始结果 {limit + 500} 行" in trimmed["explanation"],
+        str(trimmed["explanation"]),
+    )
+
+    # 已有 explanation 的：补注追加在原文之后，原文不丢
+    with_expl = _result(limit + 1)
+    with_expl["explanation"] = f"已返回全量数据，共 {limit + 1} 行。"
+    kept = _trim_result(with_expl)["explanation"]
+    _check("补注追加在原说明之后", kept.startswith(with_expl["explanation"]), kept)
+
+    # 原 explanation 为空的也要写进说明，不能只剩空串
+    no_expl = _result(limit + 1)
+    _check(
+        "无 explanation 时说明仍写全",
+        _trim_result(no_expl)["explanation"] == f"（历史记录仅保留前 {limit} 行，原始结果 {limit + 1} 行）",
+        str(_trim_result(no_expl)["explanation"]),
+    )
+
+    # 5) 不改动入参（原 dict 不被就地修改）
     _check("不就地修改原结果", len(big["rows"]) == limit + 500 and big["truncated"] is False)
 
-    # 5) 其它字段透传
+    # 6) 其它字段透传
     _check("columns 透传", trimmed["columns"] == ["a", "b"])
     _check("question 透传", trimmed["question"] == "q")
 
-    # 6) 边界：无 rows / rows 为空 / 非 dict 形状的缺失键均不报错
+    # 7) 边界：无 rows / rows 为空 / 非 dict 形状的缺失键均不报错
     _check("无 rows 键不报错", _trim_result({"question": "q"}) == {"question": "q"})
     empty = _result(0)
     _check("空 rows 原样返回", _trim_result(empty) is empty)

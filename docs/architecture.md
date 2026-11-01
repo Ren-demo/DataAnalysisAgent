@@ -31,7 +31,7 @@
 │  │  chat_service.py    闲聊/元数据咨询（schema 感知、流式）        │  │
 │  │  text2sql.py        自然语言→SQL（多方言 few-shot+校验+重试）   │  │
 │  │  agents/            LangGraph 编排 + create_agent 决策报告     │  │
-│  │  chart_service.py   图表类型推断（严格模式）                    │  │
+│  │  chart_service.py   图表类型推断（严格模式 + 多系列映射）        │  │
 │  │  datasource_service.py  Excel/CSV 上传导入 SQLite              │  │
 │  │  errors.py          统一业务异常（error_code + 友好中文提示）   │  │
 │  └──────────────┬──────────────────────────────┬────────────────┘  │
@@ -64,13 +64,14 @@
 [1] 前端 POST /api/chat/stream  {"question":"...", "data_source_id":"upload:<表名>", "history":[...]}
    ▼
 [2] intent.classify_intent(question, history, data_source_type)
-   │   → 返回 intent ∈ {query, chat, redraw, retrieval, analysis, schema}，并识别 chart_hint（bar/line/pie 或 None）
+   │   → 返回 intent ∈ {query, chat, redraw, retrieval, analysis, schema}，并识别 chart_hints（按指标顺序的 bar/line/pie 列表，可为空）
    │   → 先发出 SSE `intent` 事件告知前端分流结果（前端仅分 query/chat 两类渲染，
    │      intent 另驱动等待文案 MessagePhase，含 analysis）
    ├─ intent == query ──────────────────────────────────────────────┐
    │                                                                 │
-   │ [3] prepare_query 节点：get_engine() → get_dialect() → build_schema_text()│
-   │   │   （按数据源解析方言 sqlite/mysql/postgres，读取表结构）      │
+   │ [3] prepare_query 节点：get_engine() → get_dialect() → build_source_schema_text()│
+   │   │   （按数据源解析方言 sqlite/mysql/postgres，读取表结构；doc 源多表时      │
+   │   │    先定位收窄：块 id → 向量检索 → 零候选时沿用上一轮 SQL 用过的表）        │
    │   ▼                                                             │
    │ [4] text2sql.generate_sql_stream(question, schema_text, dialect) │
    │   ├─ 多方言 few-shot prompt → DeepSeek 流式生成 SQL token         │
@@ -105,7 +106,8 @@
    ▼
 [11] 若发生 AppError，发 SSE `error` 事件（含 error / error_code，不抛 500）
    ▼
-[12] 前端解析：query 展示表格 + 图表（按 chart_type）；chat 渲染 Markdown；
+[12] 前端解析：query 展示表格 + 图表（按 chart_series 渲染柱/线/饼与左右轴，
+      无该字段时回退 chart_type 单图）；chat 渲染 Markdown；
          错误则 ElNotification 提示
    ▼
 [13] 后端 astream 结束后若带 session_id 且 result 无 error，写入会话记忆（MongoDB，失败静默跳过）
@@ -116,15 +118,15 @@
 | 文件 | 职责 | 关键函数 / 模型 |
 | --- | --- | --- |
 | `app/config.py` | 配置管理，加载项目根目录 `.env` | `Settings`（deepseek_* / mongo_* / embedding_* / milvus_* / chat_history_* / doc_* / web_search_* / knowledge_base_enabled / `sse_heartbeat_seconds`（SSE 保活间隔，默认 10）/ `agent_recursion_limit`（agent 步数兜底，默认 40））；`settings` 单例 |
-| `app/schemas.py` | Pydantic v2 请求/响应模型 | `ColumnInfo` / `TableInfo` / `DataSourceInfo` / `SchemaResponse` / `QueryRequest` / `ChatRequest` / `ChatMessage` / `QueryResponse`（含 `kind`/`answer`/`error_code`/`chart_type`） |
+| `app/schemas.py` | Pydantic v2 请求/响应模型 | `ColumnInfo` / `TableInfo` / `DataSourceInfo` / `SchemaResponse` / `QueryRequest` / `ChatRequest` / `ChatMessage` / `QueryResponse`（含 `kind`/`answer`/`error_code`/`chart_type`/`chart_series`/`used_tables`）、`ChartSeries` |
 | `app/errors.py` | 统一业务异常 | `AppError`（携带 `message` 与 `error_code`） |
-| `app/database/engine.py` | 多数据源路由 + 引擎缓存 + 结构读取 + 关联关系识别 | `get_engine()` / `get_dialect()` / `get_schema_info()` / `build_schema_text()` / `resolve_data_source_type()` |
+| `app/database/engine.py` | 多数据源路由 + 引擎缓存 + 结构读取 + 关联关系识别 + 文档表格定位 | `get_engine()` / `get_dialect()` / `get_schema_info()` / `build_schema_text()` / `build_source_schema_text()` / `locate_doc_tables()`（块 id → 向量检索 → 上文续接）/ `resolve_data_source_type()` |
 | `app/database/mongo.py` | MongoDB 连接（sessions 会话记忆 + connections 连接） | `get_client()` / `get_sessions_collection()` / `get_connections_collection()` / `ensure_indexes()` / `close_client()` |
 | `app/database/milvus.py` | Milvus 向量库（langchain-milvus） | `get_vector_store()` / `vector_index()` / `vector_search()` |
 | `app/database/datasource_config.py` | 加载外部数据源配置（静态 + 运行时合并） | `get_datasource_by_id()` / `list_external_datasources()` / `set_runtime_datasources()` |
 | `app/llm/client.py` | LLM 客户端工厂 | `get_llm() -> ChatOpenAI`（无 Key / 构造失败抛 `AppError`） |
 | `app/llm/embedding.py` | 外部 embedding 客户端（向量检索硬依赖） | `get_embeddings() -> OpenAIEmbeddings` |
-| `app/llm/intent.py` | 意图分类 + 图表类型识别 | `classify_intent(question, history, data_source_type)` → `IntentResult(intent, chart_hint)`，五类 query/chat/redraw/retrieval/analysis，带关键词规则兜底 |
+| `app/llm/intent.py` | 意图分类 + 图表类型识别 | `classify_intent(question, history, data_source_type)` → `IntentResult(intent, chart_hint, chart_hints)`（`chart_hint` 为兼容旧链路的主类型），五类 query/chat/redraw/retrieval/analysis，带关键词规则兜底 |
 | `app/llm/text2sql.py` | 自然语言 → SQL（多方言） | `generate_sql()` / `generate_sql_stream()`（few-shot + sqlglot + 重试）；`validate_sql()` / `extract_sql()` |
 | `app/llm/summary.py` | 滚动摘要生成 | `generate_summary(previous_summary, new_messages)`（旧对话压缩，静默降级） |
 | `app/llm/title.py` | 会话标题生成 | `generate_title(question)`（LLM 概括首条问题 + 截断兜底） |
@@ -134,8 +136,8 @@
 | `app/agents/report.py` | 决策报告模型与解析 | `ReportResult` / `parse_report()`（DeepSeek 思考模式用手动 JSON 解析） |
 | `app/agents/stat_tools.py` | 统计建模算子 | `build_stat_tools()`（get_schema/load_table（支持 `filters` 多条件 AND）/group_aggregate/group_correlate/group_mom_growth/group_mom_growth_rate/group_cagr（年均增长率 CAGR）/group_share/group_vs_overall_avg/intersect_groups（条件值可引用另一列）/linear_regression/forecast_time_series/detect_anomalies/cluster_kmeans，只读，df_store 请求级隔离） |
 | `app/agents/analysis.py` | 分析结果模型与解析 | `AnalysisResult` / `parse_analysis()` / `_ANALYSIS_SYSTEM_PROMPT` / `build_analysis_system_prompt()`（注入 schema、要求一次性规划并行调用；DeepSeek 思考模式用手动 JSON 解析） |
-| `app/services/chart_service.py` | 图表类型推断（严格模式） | `suggest_chart_type()` |
-| `app/services/query_service.py` | 查询执行 | `run_query()` / `execute_sql()` / `_to_json_safe()` |
+| `app/services/chart_service.py` | 图表类型推断（严格模式 + 多系列映射） | `suggest_chart_type()`（兼容薄壳）、`suggest_chart_series()`（按列顺序映射 type/axis，bar+line 时 line 挂右轴） |
+| `app/services/query_service.py` | 查询执行 | `run_query()` / `execute_sql()` / `_to_json_safe()` / `_extract_used_tables()`（解析 SQL 实际引用的表，供文档定位上文续接） |
 | `app/services/chat_service.py` | 闲聊 / 元数据咨询 + 文档问答 + 查询结果简短分析 | `chat_stream(question, history, schema_text, summary)` / `retrieval_stream(question, context)` / `summarize_query_result(question, columns, rows, row_count)` |
 | `app/services/context_service.py` | 闲聊上下文治理 | `build_chat_context()`（近期窗口截断 + 滚动摘要编排） |
 | `app/services/datasource_service.py` | Excel/CSV 上传导入 | `import_file()` / `list_datasources()` |

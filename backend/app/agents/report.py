@@ -73,6 +73,22 @@ def _extract_json(text: str) -> str | None:
     return text[start : end + 1]
 
 
+def _as_str_list(value) -> list[str]:
+    """把模型可能返回的 null / 单个字符串 / 列表统一成字符串列表。
+
+    DeepSeek 偶发输出 ``"key_findings": null``：早前直接对 ``None`` 做列表推导会抛
+    ``TypeError``，被外层 ``except`` 吞掉后整份报告降级为「原文前 500 字作摘要」——
+    前端看到的是一段被截断的 JSON 字符串、``key_findings`` 全空，看起来像报告坏了。
+    """
+    if not value:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [str(x) for x in value if x]
+    return [str(value)]
+
+
 def parse_report(text: str, question: str) -> ReportResult:
     """解析 agent 输出的 JSON 报告；失败时降级为「以原文作摘要」的最小报告。"""
     raw = _extract_json(text)
@@ -86,9 +102,9 @@ def parse_report(text: str, question: str) -> ReportResult:
                 return ReportResult(
                     title=str(data.get("title") or "数据分析报告"),
                     summary=str(data.get("summary") or ""),
-                    key_findings=[str(x) for x in data.get("key_findings", []) if x],
+                    key_findings=_as_str_list(data.get("key_findings")),
                     analysis=data.get("analysis"),
-                    recommendations=[str(x) for x in data.get("recommendations", []) if x] or None,
+                    recommendations=_as_str_list(data.get("recommendations")) or None,
                     confidence=confidence,
                 )
         except Exception:

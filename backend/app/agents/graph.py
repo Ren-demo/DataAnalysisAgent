@@ -53,7 +53,7 @@ from app.llm.intent import (
 )
 from app.llm.text2sql import _response_to_text, extract_sql, generate_sql_stream
 from app.schemas import QueryResponse, SourceRef
-from app.services.chart_service import suggest_chart_type
+from app.services.chart_service import suggest_chart_series
 from app.services.chat_service import chat_stream, retrieval_stream, schema_consult_stream, summarize_query_result
 from app.services.context_service import build_chat_context
 from app.services.document_service import (
@@ -62,7 +62,7 @@ from app.services.document_service import (
     retrieve_doc,
 )
 from app.services.memory_service import get_last_query_result
-from app.services.query_service import execute_sql
+from app.services.query_service import execute_sql, truncation_note
 from app.services.schema_service import (
     answer_schema_question,
     answer_schema_question_multi,
@@ -97,7 +97,12 @@ async def _classify_node(state: OrchestratorState) -> dict:
     if data_source_type == "doc" and intent.intent in ("query", "analysis"):
         doc_id = parse_doc_id(data_source_id)[0]
         if not await asyncio.to_thread(get_doc_tables, doc_id):
-            intent = IntentResult(intent="retrieval")
+            # 就地改判时保留图表/输出字段，与 intent._route_doc_intent 的原则一致
+            intent = IntentResult(
+                intent="retrieval",
+                chart_hints=intent.chart_hints,
+                want_sql=intent.want_sql,
+            )
 
     # 前端据此前置等待文案（检索文档 / 读取表结构 / 生成 SQL / 数据分析 / 思考）。
     # 早前把 retrieval/schema 压平成 chat，前端无从区分「文档检索」与「闲聊」，
@@ -110,10 +115,16 @@ async def _classify_node(state: OrchestratorState) -> dict:
         if intent.intent in ("chat", "retrieval", "schema", "analysis")
         else "query"
     )
-    w({"type": "intent", "intent": frontend_intent, "chart_hint": intent.chart_hint})
+    w({
+        "type": "intent",
+        "intent": frontend_intent,
+        "chart_hint": intent.chart_hint,
+        "chart_hints": intent.chart_hints,
+    })
     return {
         "intent": intent.intent,
         "chart_hint": intent.chart_hint,
+        "chart_hints": intent.chart_hints,
         "want_sql": intent.want_sql,
         "answer_format": detect_answer_format(state["question"]),
         "data_source_type": data_source_type,
@@ -172,7 +183,22 @@ async def _prepare_query_node(state: OrchestratorState) -> dict:
     # —— 都必须移出事件循环。
     engine = await asyncio.to_thread(get_engine, ds)
     dialect = get_dialect(ds)
-    schema_text = await asyncio.to_thread(build_source_schema_text, engine, ds, state["question"])
+    # 文档源的同会话追问常不含表名（如先「展示所有数据」再「按月汇总」），而多表
+    # 文档里同构表格会互相干扰，向量检索可能整批落在阈值之外 → 定位零候选、schema
+    # 回退全量。这里把上一轮 SQL 实际用过的表带过去，仅在检索零候选时兜底沿用
+    # （见 engine.locate_doc_tables 第三级）。其它数据源不多一次 Mongo 读。
+    prior_tables: list[str] | None = None
+    if ds.startswith("doc:") and state.get("session_id"):
+        prev = await get_last_query_result(state.get("session_id"), data_source_id=ds)
+        if prev:
+            prior_tables = prev.get("used_tables") or None
+    schema_text = await asyncio.to_thread(
+        build_source_schema_text,
+        engine,
+        ds,
+        state["question"],
+        prior_tables=prior_tables,
+    )
     return {"engine": engine, "dialect": dialect, "schema_text": schema_text}
 
 
@@ -387,16 +413,20 @@ async def _analysis_node(state: OrchestratorState) -> dict:
             except Exception:
                 reasoning = None
 
+        # 用户显式指定的图表类型在这里同样要生效：早前 analysis 分支整条丢掉
+        # chart_hint，导致「用柱状图看各品类环比」在统计链路下永不出图，
+        # 与「严格图表模式」的契约不符（query 分支会照常出图）。
+        chart_type, chart_series = suggest_chart_series(
+            columns, rows, state.get("chart_hints") or state.get("chart_hint")
+        )
         result = QueryResponse(
             question=question,
             kind="query",
             columns=columns,
             rows=rows,
             row_count=len(rows),
-            # 用户显式指定的图表类型在这里同样要生效：早前 analysis 分支整条丢掉
-            # chart_hint，导致「用柱状图看各品类环比」在统计链路下永不出图，
-            # 与「严格图表模式」的契约不符（query 分支会照常出图）。
-            chart_type=suggest_chart_type(columns, rows, question, state.get("chart_hint")),
+            chart_type=chart_type,
+            chart_series=chart_series,
             explanation=analysis.answer,
             analysis=reasoning,
         )
@@ -422,6 +452,7 @@ async def _analysis_node(state: OrchestratorState) -> dict:
         engine,
         state.get("chart_hint"),
         state.get("want_sql", False),
+        chart_hints=state.get("chart_hints"),
     )
     if result.error:
         w({"type": "error", "message": result.error, "error_code": result.error_code})
@@ -441,6 +472,7 @@ async def _execute_node(state: OrchestratorState) -> dict:
         state["engine"],
         state.get("chart_hint"),
         state.get("want_sql", False),
+        chart_hints=state.get("chart_hints"),
     )
     if result.error:
         w({"type": "error", "message": result.error, "error_code": result.error_code})
@@ -475,7 +507,8 @@ async def _execute_node(state: OrchestratorState) -> dict:
                     result.question, result.columns, result.rows, result.row_count
                 )
                 if analysis:
-                    result.explanation = analysis
+                    # 截断提示必须保留：整段覆盖会让正文说「已返回全量」而 rows 只有前 N 行
+                    result.explanation = analysis + truncation_note(result.row_count, result.truncated)
             except Exception:
                 pass  # 分析为增强能力：失败静默降级为原规则文案
         w({"type": "result", "data": result.model_dump()})
@@ -542,9 +575,20 @@ async def _redraw_node(state: OrchestratorState) -> dict:
         w({"type": "result", "data": err.model_dump()})
         return {"result": err}
 
-    chart_type = state.get("chart_hint")
-    if chart_type not in ("bar", "line", "pie"):
-        chart_type = "bar"  # 用户只想「画个图」未指定类型时，默认柱状图
+    hints = state.get("chart_hints") or (
+        [state["chart_hint"]] if state.get("chart_hint") else ["bar"]
+    )
+    # 用户只想「画个图」未指定类型时，默认柱状图（沿用旧行为）。
+    # 指定了多种类型时按上一轮结果的列顺序重新映射。
+    chart_type, chart_series = suggest_chart_series(
+        prev.get("columns") or [], prev.get("rows") or [], hints
+    )
+    if chart_type == "table":
+        explanation = "上一步结果为空或列数不足，无法绘制图表。"
+    else:
+        explanation = (
+            f"已根据上一步查询结果绘制图表（共 {prev.get('row_count') or 0} 条数据）。"
+        )
     result = QueryResponse(
         question=state["question"],
         kind="query",
@@ -553,22 +597,35 @@ async def _redraw_node(state: OrchestratorState) -> dict:
         rows=prev.get("rows") or [],
         row_count=prev.get("row_count") or 0,
         chart_type=chart_type,
-        explanation=f"已根据上一步查询结果绘制图表（共 {prev.get('row_count') or 0} 条数据）。",
+        chart_series=chart_series,
+        # 重绘本身不执行 SQL，但表沿用自上一轮：继续带下去，否则「展示数据 → 换成折线图
+        # → 按月汇总」这条路径上的第三轮会丢掉上文续接能力。
+        used_tables=prev.get("used_tables") or [],
+        explanation=explanation,
     )
     w({"type": "result", "data": result.model_dump()})
     return {"result": result}
 
 
-async def _locate_doc_tables(ds: str, question: str, table_names: list[str]) -> list[str]:
+async def _locate_doc_tables(
+    ds: str,
+    question: str,
+    table_names: list[str],
+    *,
+    prior_tables: list[str] | None = None,
+) -> list[str]:
     """``engine.locate_doc_tables`` 的**异步薄壳**：只为把同步阻塞检索移出事件循环。
 
     定位逻辑（四条硬约束：块 id 精确优先、本数据源白名单、L2 上界阈值 + margin
-    成组保留、按块内容去重）全部在 ``engine.locate_doc_tables`` 里，改动请去那里
+    成组保留、按块内容去重，以及零候选时的上文续接）全部在
+    ``engine.locate_doc_tables`` 里，改动请去那里
     —— 它同时被 ``build_source_schema_text`` 复用（``/api/query`` 等同步链路）。
     这里保留薄壳是因为 ``_schema_node`` 与 ``scripts/test_doc_locator.py`` 都从
     本模块引用这个符号。
     """
-    return await asyncio.to_thread(locate_doc_tables, ds, question, table_names)
+    return await asyncio.to_thread(
+        locate_doc_tables, ds, question, table_names, prior_tables=prior_tables
+    )
 
 
 def _deterministic_schema_answer(

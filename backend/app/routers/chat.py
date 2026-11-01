@@ -58,6 +58,7 @@ def query(request: QueryRequest) -> QueryResponse:
         request.data_source_id,
         chart_hint=request.chart_hint,
         include_sql=detect_want_sql(request.question),
+        chart_hints=request.chart_hints,
     )
 
 
@@ -70,7 +71,12 @@ def _sse(data: dict) -> str:
 async def query_stream(request: QueryRequest) -> StreamingResponse:
     """流式查询：逐 token 推送 SQL，最后推送完整结果。"""
     return StreamingResponse(
-        _stream_response(request.question, request.data_source_id, request.chart_hint),
+        _stream_response(
+            request.question,
+            request.data_source_id,
+            request.chart_hint,
+            request.chart_hints,
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -90,6 +96,7 @@ async def _stream_response(
     question: str,
     data_source_id: str,
     chart_hint: str | None = None,
+    chart_hints: list[str] | None = None,
 ):
     """查询流式响应生成器：sql_token 事件流 + 最终 result/error 事件（供 /query/stream 用）。"""
     try:
@@ -129,7 +136,15 @@ async def _stream_response(
         return
 
     sql = extract_sql("".join(collected))
-    result = await asyncio.to_thread(execute_sql, question, sql, engine, chart_hint, want_sql)
+    result = await asyncio.to_thread(
+        execute_sql,
+        question,
+        sql,
+        engine,
+        chart_hint,
+        want_sql,
+        chart_hints=chart_hints,
+    )
     if result.error:
         yield _sse({
             "type": "error",

@@ -236,13 +236,13 @@ def test_source_schema_text_branches() -> None:
     try:
         # 1) doc 源定位命中 → 收窄到那一张，且带取值
         eng_mod.resolve_table_names = lambda ds: many
-        eng_mod.locate_doc_tables = lambda ds, q, tables: ["d0"]
+        eng_mod.locate_doc_tables = lambda ds, q, tables, **kw: ["d0"]
         out = build_source_schema_text(eng, "doc:dx", "=== blk === 那张表里有多少行？")
         _check("doc 源命中 → 收窄到定位表", "CREATE TABLE d0" in out and "CREATE TABLE d1" not in out, out)
         _check("doc 源命中 → 带取值区", "v-d0" in out, out)
 
         # 2) doc 源定位不到 → 回退全量，**且刻意不带取值**（239 张表各带样本会撑爆 prompt）
-        eng_mod.locate_doc_tables = lambda ds, q, tables: []
+        eng_mod.locate_doc_tables = lambda ds, q, tables, **kw: []
         out = build_source_schema_text(eng, "doc:dx", "文档里提到了什么？")
         _check("doc 源未命中 → 回退全量表结构", out.count("CREATE TABLE") == len(many), out)
         _check("doc 源回退时**不带**取值区", "-- 表 " not in out, out)

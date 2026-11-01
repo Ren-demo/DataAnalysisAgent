@@ -1,4 +1,15 @@
 export type ChartType = 'bar' | 'line' | 'pie' | 'table' | null
+/** 组合图中单个系列的类型（饼图不参与组合，由后端保证独占）。 */
+export type ChartSeriesType = 'bar' | 'line' | 'pie'
+/** 系列挂哪根 y 轴：量级差异大的指标（营业额 vs 客单数）分列左右。 */
+export type ChartAxis = 'left' | 'right'
+
+export interface ChartSeries {
+  /** 宽表=指标列名；长表=系列名 */
+  column: string
+  type: ChartSeriesType
+  axis: ChartAxis
+}
 /** 渲染家族：'query' 出表格/图表/SQL，'chat' 出自然语言答案。也是 QueryResponse.kind 的契约。 */
 export type MessageKind = 'query' | 'chat'
 /**
@@ -34,7 +45,14 @@ export interface QueryResponse {
   columns: string[]
   rows: (string | number | null)[][]
   row_count: number
+  /** 会话历史回放时出现：落库前按 memory_max_rows 截断，这里记原始行数 */
+  truncated?: boolean
+  original_row_count?: number | null
   chart_type: ChartType
+  /** 多系列映射（有序，与指标/系列一一对应）；旧会话没有该字段，回退 chart_type 单图 */
+  chart_series?: ChartSeries[] | null
+  /** 本轮 SQL 实际引用的表；仅文档源多表定位的上文续接使用，界面不消费 */
+  used_tables?: string[]
   explanation: string | null
   analysis: string | null
   error: string | null

@@ -10,6 +10,7 @@
 - 每张提取出的表格另建一张 ``doc_<doc_id>_<i>`` 表
 """
 import datetime
+import hashlib
 import io
 import json
 import logging
@@ -218,6 +219,16 @@ def _existing_doc_tables(engine, doc_id: str) -> list[str]:
     return [t for t in inspect(engine).get_table_names() if t.startswith(prefix)]
 
 
+def _table_fingerprint(df: pd.DataFrame) -> str:
+    """表格内容指纹（列名 + 全部数据体），用于识别文档中逐字重复的副本块。
+
+    同一份数据在文档里常被复制成多个块（赛题 Multi-step 实测：咖啡表 4 连、能源表 5 连，
+    副本逐字节相同）。按 CSV 文本求 sha256 比逐行比对便宜，也不会像
+    ``pd.util.hash_pandas_object`` 那样对超宽表有溢出/碰撞风险。
+    """
+    return hashlib.sha256(df.to_csv(index=False).encode("utf-8")).hexdigest()
+
+
 def import_document(file: UploadFile) -> str:
     """解析上传文档，写入 docs.db，返回 ``doc:<doc_id>``。"""
     filename = file.filename or ""
@@ -235,6 +246,8 @@ def import_document(file: UploadFile) -> str:
     doc_id = uuid.uuid4().hex[:12]
     records: list[dict] = []
     tables_to_write: list[tuple[str, pd.DataFrame]] = []
+    # 内容指纹 → 首次出现的表名。同文档内逐字相同的表格块只建一张表。
+    seen_tables: dict[str, str] = {}
     table_count = 0
     text_count = 0
 
@@ -247,8 +260,13 @@ def import_document(file: UploadFile) -> str:
             df = df.copy()
             orig_columns = list(df.columns)  # 原始表头（清洗前，如数字表头 0/1）
             df.columns = _sanitize_columns(orig_columns)
-            table_name = f"doc_{doc_id}_{idx}"
-            tables_to_write.append((table_name, df))
+            # 副本块复用首张表：否则库里会出现多张同构表，模型可能分别聚合再把结果相加
+            fingerprint = _table_fingerprint(df)
+            table_name = seen_tables.get(fingerprint)
+            if table_name is None:
+                table_name = f"doc_{doc_id}_{idx}"
+                seen_tables[fingerprint] = table_name
+                tables_to_write.append((table_name, df))
             sample = df.head(5).to_string(index=False)
             records.append({
                 "doc_id": doc_id,
@@ -393,6 +411,56 @@ def get_doc_tables(doc_id: str) -> list[str]:
         logger.warning("读取文档 %s 的表格列表失败，按无表格处理。", doc_id, exc_info=True)
         return []
     return [r for r in rows if r]
+
+
+def dedupe_doc_tables(doc_id: str, table_names: list[str]) -> list[str]:
+    """去掉同一文档里**内容逐字相同**的「副本表」，每个内容组只保留首张表。
+
+    文档常把同一张表复制成多个块（赛题 Multi-step 实测：咖啡表 4 连、能源表 5 连，
+    48 个块去重后只有 23 张表）。新导入已按内容指纹合并（见 ``_table_fingerprint``），
+    但**历史文档**在库里仍是多张同构表。查询期把多张副本一起交给模型时，它会分别
+    聚合再相加——营业额与客单数直接翻 4 倍，且结果形态完全正常、无从察觉。
+
+    这里用 ``doc_blocks.content``（表格块存的是「列名 + 前 5 行样本」，副本逐字相同）
+    分组兜底，保证存量文档也不会把副本表送进 schema。
+
+    降级口径与 ``get_doc_tables`` / ``get_doc_meta`` 一致：读库失败时原样返回，
+    不阻断查询链路；没有 ``doc_blocks`` 记录的表一律保留，避免误删可用表。
+    """
+    if not table_names or not settings.docs_db_path.exists():
+        return table_names
+    try:
+        with _docs_engine().connect() as conn:
+            rows = conn.execute(
+                text(
+                    # 按块顺位取「首次出现」：不排序时 SQLite 虽通常按 rowid 返回，
+                    # 但那是实现细节，保留哪张副本必须可复现（出题与出库要对得上）。
+                    "SELECT table_name, content FROM doc_blocks "
+                    "WHERE doc_id = :d AND table_name IS NOT NULL "
+                    "ORDER BY block_index"
+                ),
+                {"d": doc_id},
+            ).all()
+    except Exception:
+        logger.warning("文档 %s 的副本表去重失败，按原表列表处理。", doc_id, exc_info=True)
+        return table_names
+
+    recorded = {str(t) for t, _ in rows}
+    keep: set[str] = set()
+    seen_content: dict[str, str] = {}
+    for table_name, content in rows:
+        name = str(table_name)
+        key = str(content or "")
+        if not key:
+            keep.add(name)  # 没有内容记录：无从判断是否重复，一律保留
+        elif key not in seen_content:
+            seen_content[key] = name
+            keep.add(name)  # 每组内容只保留首次出现的那张（按 block_index）
+
+    removed = len(table_names) - len([t for t in table_names if t not in recorded or t in keep])
+    if removed:
+        logger.info("文档 %s 有 %d 张同内容副本表，已从 schema 中剔除。", doc_id, removed)
+    return [t for t in table_names if t not in recorded or t in keep]
 
 
 def get_doc_table_by_block(doc_id: str, block_id: str) -> str | None:
