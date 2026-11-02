@@ -21,7 +21,15 @@ from app.schemas import ChatMessage
 class SchemaQuestion(BaseModel):
     """表结构/列名咨询问句的结构化识别结果（纯规则，供确定性 schema 回答）。"""
 
-    kind: Literal["nth_column", "column_by_name", "list_columns", "column_count", "row_count"]
+    kind: Literal[
+        "nth_column",
+        "column_by_name",
+        "list_columns",
+        "column_count",
+        "row_count",
+        "source_id",
+        "table_id",
+    ]
     n: int | None = None      # nth_column：第 n 列（1-based）
     name: str | None = None   # column_by_name：被点名的列名
 
@@ -437,6 +445,22 @@ def _has_aggregate_context(q: str) -> bool:
     return any(w in q for w in _AGG_CONTEXT_WORDS)
 
 
+# 「数据源 / 表」的 id、编号、标识咨询。用负向前瞻放过两类数据/列问题：
+#   「表的 id 列是什么」「表中 id 为 5 的记录」——前者问列，后者问取值。
+# 负向后顾排除「报表 / 图表 / 列表 / 代表」里的「表」，避免把它们的编号当成数据源 id。
+# 刻意不含「文档」：「文档编号 / 文档标识」更可能指正文里的编号，锁成 schema 会误答；
+# 这类问法仍走 chat/retrieval，由 chat_service 注入的数据源 id 兜住。
+#
+# 名词捕获用于区分两种回答：
+# - 「数据源 id」→ 文档级数据源 id（doc:<doc_id> / upload:<表名>）；
+# - 「表的 id」→ 该表在原文中的块 id（doc:<doc_id>:<块id>）。
+_SOURCE_ID_RE = re.compile(
+    r"(?P<noun>数据源|数据表|表格|(?<![报图列代])表|这个表|该表|这张表)\s*(?:的)?\s*"
+    r"(?:[Ii][Dd]|编号|标识|标示)"
+    r"(?!\s*(?:列|字段|值|为\s*\d|是\s*\d))"
+)
+
+
 def detect_schema_question(question: str) -> SchemaQuestion | None:
     """纯规则识别「表结构/列名/字段」咨询问句，返回结构化 SchemaQuestion 或 None。
 
@@ -486,6 +510,15 @@ def detect_schema_question(question: str) -> SchemaQuestion | None:
     if any(w in q for w in ("行数", "多少行", "有几行")):
         if not _has_aggregate_context(q):
             return SchemaQuestion(kind="row_count")
+
+    # 7) 数据源 / 表的 id、编号、标识。放在最后，避免改变上面既有问句的判定。
+    #    「描述咖啡销量的表的id是多少」曾因此走 chat，模型只看到 DDL 里的内部物理表名
+    #    （doc_<doc_id>_<idx>）就把它当成表的 id 复述 —— 用户要的其实是原文中的块 id。
+    m = _SOURCE_ID_RE.search(q)
+    if m:
+        # 「数据源 id」答文档级 id；「表 / 表格 id」定位到具体表后答原文块 id。
+        kind = "source_id" if m.group("noun") == "数据源" else "table_id"
+        return SchemaQuestion(kind=kind)
 
     return None
 

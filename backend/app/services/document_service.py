@@ -482,6 +482,45 @@ def get_doc_table_by_block(doc_id: str, block_id: str) -> str | None:
     return row or None
 
 
+def get_doc_table_blocks(
+    doc_id: str, table_names: list[str] | None = None
+) -> dict[str, list[str]]:
+    """返回「表名 → 原文块 id 列表」，按 ``block_index`` 排序。
+
+    一张表可能对应多个内容逐字相同的副本块（新导入已按指纹合并成一张物理表，
+    但 ``doc_blocks`` 仍保留原文里的每个块）。块 id 是用户在原文/赛题里看到的标识，
+    也是 ``doc:<doc_id>:<块id>`` 精确定位的第三段，故这里一并返回，由调用方决定
+    展示一个还是全部。读库失败时返回空字典（与同族读取函数同一降级口径）。
+    """
+    if not settings.docs_db_path.exists():
+        return {}
+    wanted = set(table_names) if table_names else None
+    try:
+        with _docs_engine().connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT table_name, block_id FROM doc_blocks "
+                    "WHERE doc_id = :d AND table_name IS NOT NULL AND block_id IS NOT NULL "
+                    "ORDER BY block_index"
+                ),
+                {"d": doc_id},
+            ).all()
+    except Exception:
+        logger.warning("读取文档 %s 的块 id 失败，按无块 id 处理。", doc_id, exc_info=True)
+        return {}
+
+    out: dict[str, list[str]] = {}
+    for table_name, block_id in rows:
+        t = str(table_name or "")
+        b = str(block_id or "").strip()
+        if not t or not b or (wanted is not None and t not in wanted):
+            continue
+        ids = out.setdefault(t, [])
+        if b not in ids:
+            ids.append(b)
+    return out
+
+
 def get_doc_table_original_columns(table_name: str) -> list[str] | None:
     """返回某文档表**清洗前的原始表头**（如数字表头 ``0/1`` 被清洗成 ``t_0/t_1``）；无记录返回 None。
 

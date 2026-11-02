@@ -144,7 +144,7 @@ backend/
 | `tools.py` | 报告 agent 工具：`get_schema` / `generate_sql` / `execute_sql`，按配置追加联网与知识库工具 |
 | `stat_tools.py` | 14 个统计 / 建模工具与请求级 `df_store`；`build_stat_tools` 统一登记 |
 | `analysis.py` | 分析结果模型、`build_analysis_system_prompt`（内联 schema、要求并行规划）、JSON 解析 |
-| `report.py` | 决策报告模型、系统提示、输入组装与解析 |
+| `report.py` | 决策报告模型、系统提示、输入组装与解析（配对扫描 → 宽松载入 → 正则抢救 → 字段归一化） |
 
 #### app/database
 
@@ -300,6 +300,8 @@ curl -N -X POST http://localhost:8000/api/chat/stream \
 
 `result` 事件之后若 `report_enabled` 为真，报告 agent 会串行产出 `report` 事件，前端经 `ReportCard` 卡片展示标题 / 核心结论 / 关键发现 / 建议 / 置信度。
 
+`report` 载荷在前端 `api/index.ts` 的 `normalizeReport()` 统一归一化，**SSE 实时报告与 `GET /api/sessions/{id}` 的历史回放共用**：旧版解析降级在 MongoDB 里留下的坏报告（`summary` 是截断 JSON）读取时会被拆包、抢救成短结论 + 关键发现，无需数据迁移。
+
 ### SSE 事件与保活
 
 | 事件 | 载荷 | 含义 |
@@ -330,7 +332,8 @@ curl -N -X POST http://localhost:8000/api/chat/stream \
 
 ### 文档数据源（doc:）
 
-- 标识：`doc:<id>`。
+- 标识：`doc:<id>`。这是前端下拉与 `/api/datasources` 唯一暴露的数据源 id。
+- 物理表名：入库时按块序号生成 `doc_<doc_id>_<idx>`（`document_service.import_document`），只用于 SQL 与表结构展示，**既不是**数据源 id，**也不是**原文块 id。用户问「数据源 id」时回答 `doc:<doc_id>`；问「某张表的 id」时回答原文块 id，完整定位为 `doc:<doc_id>:<块id>`（见「表结构与列名咨询」）。
 - 解析：`.md` / `.txt` / `.pdf` / `.docx`。表格入 `backend/data/docs.db`，文本结构感知分块后向量化入 Milvus。
 - 每个文档只暴露一个文档级条目 `doc:<id>`（`document_service.list_documents`）。选中后由程序自动解析出该文档提取出的全部表格，单张提取表的条目不会出现在前端下拉里。
 - 块 id 寻址：多块文档（如被 `=== <块id> ===` 切成数百张小表的赛题 `Table_Query-数据.md`）支持 `doc:<doc_id>:<块id>`。`app/database/engine.py` 的 `_resolve_doc_table` 把第三段经 `get_doc_table_by_block` 映射到真实表，`resolve_table_names` 返回单表。该寻址只在题干显式带块 id 时走，不是下拉项。
@@ -517,6 +520,14 @@ text2sql 的 system prompt 配套要求：WHERE / HAVING 的取值必须来自 s
 
 DeepSeek「思考模式」不支持 `response_format` / 强制 `tool_choice`，报告结构化输出用人工 JSON 解析（参考 `app/agents/report.py`）。
 
+解析契约（`parse_report()`）：
+
+- 四层防线：**配对花括号扫描**（跳过字符串内的 `{}`，多个对象时选最像报告的那个）→ **宽松载入**（`json.loads` / `ast.literal_eval` / 尾逗号与截断补全）→ **正则抢救**（从无法修复的残片里只抓字段值）→ **字段归一化**（`summary` 嵌套 JSON 拆包回填、`analysis` 为对象/数组时转可读 Markdown、`key_findings` 元素为对象时转字符串）；
+- `summary` 进卡片前只保留纯文本（一条结论），空字符串、`null`、JSON、Markdown 列表都不会原样透出；
+- 彻底失败时返回固定友好文案，**模型原始输出只进 `logger.warning`，绝不回显给用户**（与 `analysis.py` 的 `_FALLBACK_ANSWER` 同一约定）；
+- 提示词要求 `title` ≤20 字且不照抄问题、`summary` 纯文本 ≤120 字、`key_findings` 3~5 条、整体 JSON ≤1800 字并完整闭合；
+- 自检：`python scripts/test_report_parse.py`（纯函数，不依赖 LLM）。
+
 ### 数据外发与配置卫生
 
 - 联网搜索默认关闭（`WEB_SEARCH_PROVIDER=none`）。一旦设为 `duckduckgo` / `tavily`，决策报告 agent 在推理过程中会把用户提问按原样发往第三方搜索服务。这是数据外发行为，请自行评估是否可接受。
@@ -579,15 +590,18 @@ DeepSeek「思考模式」不支持 `response_format` / 强制 `tool_choice`，�
 
 ### 识别规则
 
-- `app/llm/intent.py` 的 `detect_schema_question` 纯规则识别：第 N 列 / 哪一列被称为 X / 名为 X 的列 / 列名 / 字段 / 表结构 / 列数 / 行数。
+- `app/llm/intent.py` 的 `detect_schema_question` 纯规则识别：第 N 列 / 哪一列被称为 X / 名为 X 的列 / 列名 / 字段 / 表结构 / 列数 / 行数 / 数据源或表的 id。
 - 在 `classify_intent` 里优先于 chat / query 与 doc 的 retrieval 分流，锁定为 `schema`。
+- 「数据源 id」识别为 `SchemaQuestion(kind="source_id")`，由 `graph._schema_node` 用 `_source_id_answer` 回答文档级 / 上传级 id（`doc:<doc_id>` / `upload:<表名>`）。
+- 「某张表的 id / 块 id」识别为 `SchemaQuestion(kind="table_id")`：先用与 schema 相同的 `_locate_doc_tables` 定位表格，再经 `document_service.get_doc_table_blocks` 映射回原文块 id，回答 `doc:<doc_id>:<块id>`；同一张表在原文中有多个内容相同的副本块时会全部列出。定位不到时请用户补充表名或内容，不猜。
+- 两种 id 问句都不走模型；`doc_<doc_id>_<idx>` 只是内部物理表名，既不是数据源 id，也不是原文块 id。负向前瞻会放过「表的 id 列是什么」「表中 id 为 5 的记录」这类列 / 取值问题。
 - 规则已收紧「第 N 列」问句后缀，优先「哪一列…」疑问句，避免把赛题前置语境「第一行和第一列标记数据编码的起点」里的「第一列」误判为第 N 列。
 
 ### 主路径：模型驱动的 schema 总览
 
 - `app/services/schema_service.py` 的 `build_schema_overview` 生成按列序编号、含样本行的表结构总览（多表有界截断）。
-- 交 `app/services/chat_service.py` 的 `schema_consult_stream`（低温、反编造）流式回答，让模型自行把中文列名（谓词→predicate、主题→subject、日期→date）映射到真实英文字段并给出列序。
-- 总览只含真实列名，杜绝凭空编造。
+- 交 `app/services/chat_service.py` 的 `schema_consult_stream(question, overview, data_source_id=...)`（低温、反编造）流式回答，让模型自行把中文列名（谓词→predicate、主题→subject、日期→date）映射到真实英文字段并给出列序。
+- 总览只含真实列名，杜绝凭空编造。总览与 DDL 里只有内部物理表名，因此两条非 SQL 链路都会额外注入对外数据源 id：`schema_consult_stream(..., data_source_id=...)` 与 `chat_stream(..., data_source_id=...)`，并要求模型区分「数据源 id」与「内部表名」。
 
 ### 兜底：确定性反射
 
@@ -748,6 +762,7 @@ cd backend && python scripts/test_schema_qa.py
 | `test_sse_heartbeat.py` | SSE 保活、事件搬运、副作用次序、提前关闭时取消任务 |
 | `test_agent_progress.py` | agent 流式进度：文案、并行调用、上限、形状不符时静默 |
 | `test_analysis.py` | 统计算子数值、`filters` 多条件、`group_cagr`、跨列求交 |
+| `test_report_parse.py` | 决策报告解析：配对扫描、截断抢救、嵌套拆包、字段归一化、降级不回显原文 |
 
 另有 `batch_answer.py`（独立批量答题回填，仅依赖 `requests`）。
 

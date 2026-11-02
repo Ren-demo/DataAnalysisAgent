@@ -146,7 +146,7 @@ npm run dev    # 访问 http://localhost:5173
 ```ini
 # LLM
 DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxx
-DEEPSEEK_MODEL=deepseek-v4-pro          # 低配可改为 deepseek-v4-flash
+DEEPSEEK_MODEL=deepseek-flash
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 
 # 会话记忆（MongoDB）

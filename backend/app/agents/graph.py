@@ -57,7 +57,9 @@ from app.services.chart_service import suggest_chart_series
 from app.services.chat_service import chat_stream, retrieval_stream, schema_consult_stream, summarize_query_result
 from app.services.context_service import build_chat_context
 from app.services.document_service import (
+    get_doc_table_blocks,
     get_doc_table_by_block,
+    get_doc_table_original_columns,
     get_doc_tables,
     retrieve_doc,
 )
@@ -628,6 +630,110 @@ async def _locate_doc_tables(
     )
 
 
+def _canonical_source_id(data_source_id: str) -> str:
+    """归一到对外数据源 id：块寻址 ``doc:<id>:<block>`` 也只保留 ``doc:<id>``。"""
+    if (data_source_id or "").startswith("doc:"):
+        return f"doc:{parse_doc_id(data_source_id)[0]}"
+    return data_source_id
+
+
+def _source_id_answer(data_source_id: str) -> str:
+    """确定性回答「数据源 id」：只答文档级 / 上传级对外 id。"""
+    canonical = _canonical_source_id(data_source_id)
+    if canonical.startswith("doc:"):
+        return (
+            f"当前文档数据源的 id 是 `{canonical}`。\n\n"
+            "如果你想问的是文档里某张具体表格的块 id，可以告诉我表名或表格内容，"
+            "我再帮你定位。"
+        )
+    return f"当前数据源 id 是 `{canonical}`。"
+
+
+def _table_id_answer(
+    data_source_id: str, table_names: list[str], located: bool
+) -> str:
+    """确定性回答「某张表的 id」：给出原文块 id，并附可直接使用的块级定位。
+
+    ``doc:<doc_id>:<块id>`` 里的第三段就是原文的块 id（``doc_blocks.block_id``）。
+    同一张表在文档里常被复制成多个内容相同的块，这里全部列出 —— 任意一个都能
+    定位到同一张表，用户可挑原文里看到的那个。
+    """
+    if not data_source_id.startswith("doc:"):
+        # 上传 / 外部数据源没有「原文块」概念，数据源 id 本身即可定位。
+        return f"当前数据源是 `{data_source_id}`，这张表的 id 就是 `{data_source_id}`。"
+
+    doc_id, block_seg = parse_doc_id(data_source_id)
+    if block_seg:
+        return (
+            f"这张表对应的块 id 是 `{block_seg}`。\n\n"
+            f"完整的数据源定位是 `doc:{doc_id}:{block_seg}`。"
+        )
+
+    if not table_names:
+        return "没有找到可回答的表格信息，请确认数据源中是否包含表格。"
+    if len(table_names) > 1 and not located:
+        return (
+            "我没能从你的描述里确定具体是哪张表。\n\n"
+            f"当前文档的数据源 id 是 `doc:{doc_id}`。"
+            "你可以补充表名、列名或表格内容，我再给出对应的块 id；"
+            "如果已经知道块 id，也可以直接用 `doc:<doc_id>:<块id>` 指定。"
+        )
+
+    block_map = get_doc_table_blocks(doc_id, table_names)
+
+    if len(table_names) == 1:
+        table_name = table_names[0]
+        block_ids = block_map.get(table_name) or []
+        lines: list[str] = []
+        if block_ids:
+            if len(block_ids) == 1:
+                lines.append(f"你问的这张表对应的块 id 是 `{block_ids[0]}`。")
+            else:
+                listed = "、".join(f"`{b}`" for b in block_ids[1:])
+                lines.append(
+                    f"你问的这张表对应的块 id 是 `{block_ids[0]}`。\n\n"
+                    f"原文中还有 {len(block_ids) - 1} 个内容相同的表格块，"
+                    f"块 id 为：{listed}。"
+                )
+            lines.append(
+                f"任选一个都能定位到这张表，例如 `doc:{doc_id}:{block_ids[0]}`。"
+            )
+        else:
+            lines.append(
+                f"这张表没有记录到原文块 id。当前文档的数据源 id 是 `doc:{doc_id}`。"
+            )
+        # 原文表头可能包含空列名（Markdown 表格的行号列），展示时略去。
+        cols = [
+            str(c)
+            for c in (get_doc_table_original_columns(table_name) or [])
+            if str(c).strip()
+        ]
+        if cols:
+            shown = "、".join(cols[:10]) + ("…" if len(cols) > 10 else "")
+            lines.append(f"该表共 {len(cols)} 列：{shown}。")
+        return "\n\n".join(lines)
+
+    # 语义检索收窄后仍有多张候选：逐条列出，避免只答一张而答错表。
+    lines = [f"按你的描述，可能对应以下 {len(table_names)} 张表："]
+    for i, table_name in enumerate(table_names[:5], start=1):
+        block_ids = block_map.get(table_name) or []
+        block_txt = f"块 id `{block_ids[0]}`" if block_ids else "未记录块 id"
+        cols = [
+            str(c)
+            for c in (get_doc_table_original_columns(table_name) or [])
+            if str(c).strip()
+        ]
+        col_txt = ""
+        if cols:
+            shown = "、".join(cols[:6]) + ("…" if len(cols) > 6 else "")
+            col_txt = f"（{len(cols)} 列：{shown}）"
+        lines.append(f"{i}. {block_txt}{col_txt}")
+    if len(table_names) > 5:
+        lines.append(f"……另有 {len(table_names) - 5} 张表未列出。")
+    lines.append("告诉我你要哪一张，我可以给出完整的块级定位。")
+    return "\n".join(lines)
+
+
 def _deterministic_schema_answer(
     question: str,
     sq,
@@ -636,6 +742,10 @@ def _deterministic_schema_answer(
     ds: str,
 ) -> str:
     """LLM 不可用时的确定性反射兜底（按真实列序读列名回答，保持原有能力）。"""
+    if sq is not None and sq.kind == "source_id":
+        return _source_id_answer(ds)
+    if sq is not None and sq.kind == "table_id":
+        return _table_id_answer(ds, table_names, len(table_names) <= 1)
     target: str | None = None
     if len(table_names) == 1:
         target = table_names[0]
@@ -681,24 +791,41 @@ async def _schema_node(state: OrchestratorState) -> dict:
         engine = None
         table_names = []
 
+    # 「数据源 id」：直接答文档级 / 上传级对外 id，不读表结构、不做块定位。
+    # engine 为 None 时不短路，保留原有「无法读取表结构」的口径。
+    answer: str | None = None
+    if sq is not None and sq.kind == "source_id" and engine is not None:
+        answer = _source_id_answer(ds)
+        w({"type": "answer_token", "content": answer})
+
     # 块级定位：多表文档先把目标表收窄（块级数据源已在上一步返回单表）。
     # 与查询/分析分支共用 _locate_doc_tables —— 早前这里是内联实现，只在
     # column_by_name 问句上走 RAG，且**没有按内容去重**（同表副本会各占一个候选），
     # 于是「第 N 列的列名是什么」这类没有语义信号的问句一律落到全量总览。
-    if engine is not None and len(table_names) > 1 and ds.startswith("doc:"):
-        located = await _locate_doc_tables(ds, question, table_names)
-        if located:
-            table_names = located
+    located_tables: list[str] = []
+    if answer is None and engine is not None and len(table_names) > 1 and ds.startswith("doc:"):
+        located_tables = await _locate_doc_tables(ds, question, table_names)
+        if located_tables:
+            table_names = located_tables
         # 定位不到 → 保留全量总览兜底：位置问句（第 N 列）对向量检索本就没有信号，
         # 会被阈值拒掉。这是题干信息不足导致的本质歧义，需靠块 id 寻址解决。
 
-    answer: str | None = None
-    if engine is not None and table_names:
+    # 「某张表的 id」：定位后回答原文块 id（doc:<doc_id>:<块id>），
+    # 而不是 DDL 里的内部物理表名，也不是文档级数据源 id。
+    if answer is None and sq is not None and sq.kind == "table_id" and engine is not None:
+        answer = await asyncio.to_thread(
+            _table_id_answer, ds, table_names, bool(located_tables)
+        )
+        w({"type": "answer_token", "content": answer})
+
+    if answer is None and engine is not None and table_names:
         try:
             # 逐表 SELECT * LIMIT 3 采样，表多时是很实在的阻塞
             overview = await asyncio.to_thread(build_schema_overview, engine, table_names)
             parts: list[str] = []
-            async for token in schema_consult_stream(question, overview):
+            async for token in schema_consult_stream(
+                question, overview, data_source_id=_canonical_source_id(ds)
+            ):
                 parts.append(token)
                 w({"type": "answer_token", "content": token})
             answer = "".join(parts)
@@ -751,6 +878,7 @@ async def _chat_node(state: OrchestratorState) -> dict:
         ctx["history"],
         schema_text,
         summary=ctx["summary"],
+        data_source_id=_canonical_source_id(ds),
     ):
         parts.append(token)
         w({"type": "answer_token", "content": token})

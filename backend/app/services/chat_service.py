@@ -19,6 +19,16 @@ _SCHEMA_HINT = (
     "请据此用自然语言回答）：\n{schema}"
 )
 
+# 表结构（DDL / 总览）里只有内部物理表名，模型会把 doc_<doc_id>_<idx> 当成「表的 id」。
+# 这里显式给出对外数据源 id，并要求区分二者 —— 否则用户问「表的 id」时，
+# 答案会与前端下拉里展示的 doc:<doc_id> 对不上。
+_SOURCE_ID_HINT = (
+    "\n\n当前数据源 id：{data_source_id}\n"
+    "注意区分「数据源 id」与表结构里的表名：后者是系统内部物理表名"
+    "（文档提取出的表形如 doc_<doc_id>_<序号>），既不是数据源 id，也不是原文的块 id。"
+    "用户问数据源 id 时，用上面的值作答；不要编造原文块 id。"
+)
+
 _SUMMARY_HINT = (
     "以下是此前对话的历史摘要（供你延续上下文，忽略其中已过时的细节）：\n{summary}"
 )
@@ -49,6 +59,9 @@ _SCHEMA_CONSULT_SYSTEM_PROMPT = (
     "- 用户用中文指代某列时（如「谓词」「主题」「对象」「日期」「年份」），请把它对应到"
     "总览里真实存在的列名（如 predicate / subject / object / date / year），并给出其列序；\n"
     "- 用户问「第 N 列」「名为 X 的列」时，请按总览里的编号与真实列名回答；\n"
+    "- 用户问数据源 id、编号、标识时，请回答下方给出的数据源 id，"
+    "不要把总览里的内部物理表名（如 doc_<doc_id>_<序号>）当作数据源 id；"
+    "不要编造原文块 id；\n"
     "- 绝不编造总览里不存在的列名；若无法确定，请如实说明。\n"
     "用简洁、友好的中文回答，可用 Markdown 排版。"
 )
@@ -56,16 +69,22 @@ _SCHEMA_CONSULT_SYSTEM_PROMPT = (
 _SCHEMA_CONSULT_HINT = "===== 表结构总览 =====\n{overview}"
 
 
-async def schema_consult_stream(question: str, overview: str):
+async def schema_consult_stream(
+    question: str, overview: str, data_source_id: str | None = None
+):
     """schema 咨询流式回答：基于全局 schema 总览回答表结构/列名/列序问题（低温，反编造）。
 
     与确定性反射不同，这里把理解题意（如中文「谓词」→ 英文 predicate）交给模型，
-    但用真实表结构总览兜底，杜绝凭空编造列名。
+    但用真实表结构总览兜底，杜绝凭空编造列名。``data_source_id`` 用于回答
+    「表的 id / 数据源 id」这类问题，避免模型把总览里的内部物理表名当成 id。
     """
     llm = get_llm(temperature=0.0)
+    hint = _SCHEMA_CONSULT_HINT.format(overview=overview)
+    if data_source_id:
+        hint = f"当前数据源 id：{data_source_id}\n\n{hint}"
     messages = [
         SystemMessage(content=_SCHEMA_CONSULT_SYSTEM_PROMPT),
-        SystemMessage(content=_SCHEMA_CONSULT_HINT.format(overview=overview)),
+        SystemMessage(content=hint),
         HumanMessage(content=question),
     ]
     async for chunk in llm.astream(messages):
@@ -79,17 +98,21 @@ async def chat_stream(
     history: list[ChatMessage] | None = None,
     schema_text: str | None = None,
     summary: str | None = None,
+    data_source_id: str | None = None,
 ):
     """流式闲聊：逐 token 输出文本。NO_API_KEY 等 AppError 由调用方处理。
 
     ``history`` 应为已裁剪的近期窗口；``summary`` 为窗口之前旧对话的滚动摘要，
-    二者由 ``context_service.build_chat_context`` 组装后传入。
+    二者由 ``context_service.build_chat_context`` 组装后传入。``data_source_id``
+    为对外数据源 id（如 ``doc:<doc_id>``），用于区分「表的 id」与 DDL 里的内部表名。
     """
     llm = get_llm(temperature=0.7)
 
     system = _SYSTEM_PROMPT
     if schema_text:
         system += _SCHEMA_HINT.format(schema=schema_text)
+        if data_source_id:
+            system += _SOURCE_ID_HINT.format(data_source_id=data_source_id)
 
     messages = [SystemMessage(content=system)]
     if summary:

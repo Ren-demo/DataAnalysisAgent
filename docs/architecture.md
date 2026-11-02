@@ -100,7 +100,7 @@
    │   [10b] schema 节点：build_schema_overview → schema_consult_stream│
    │        → SSE `answer_token` → `result`（LLM 不可用时确定性反射兜底）│
    └─ intent == chat ───────────────────────────────────────────────┐
-       [10] chat_service.chat_stream(question, history, schema_text, summary)│
+       [10] chat_service.chat_stream(question, history, schema_text, summary, data_source_id)│
            → DeepSeek 流式生成回答 token → SSE `answer_token` → `result`│
        └─────────────────────────────────────────────────────────────┘
    ▼
@@ -108,6 +108,8 @@
    ▼
 [12] 前端解析：query 展示表格 + 图表（按 chart_series 渲染柱/线/饼与左右轴，
       无该字段时回退 chart_type 单图）；chat 渲染 Markdown；
+         报告先过 normalizeReport()：拆包嵌套 JSON、抢救截断字段、
+         旧版降级数据还原成短结论 + 关键发现，坏数据不回显；
          错误则 ElNotification 提示
    ▼
 [13] 后端 astream 结束后若带 session_id 且 result 无 error，写入会话记忆（MongoDB，失败静默跳过）
@@ -133,12 +135,12 @@
 | `app/agents/graph.py` | LangGraph 编排图 | `build_graph()` / `graph`（classify/prepare_query/text2sql/execute/report/redraw/chat/retrieve/analysis 9 节点） |
 | `app/agents/state.py` | 图状态定义 | `OrchestratorState`（question/intent/engine/sql/result/report 等） |
 | `app/agents/tools.py` | 报告 agent 工具集 | `build_tools()`（get_schema/generate_sql/execute_sql + 可选 web_search/knowledge_search，只读守卫） |
-| `app/agents/report.py` | 决策报告模型与解析 | `ReportResult` / `parse_report()`（DeepSeek 思考模式用手动 JSON 解析） |
+| `app/agents/report.py` | 决策报告模型与解析 | `ReportResult` / `parse_report()`（DeepSeek 思考模式用手动 JSON 解析；配对扫描 + 宽松载入 + 正则抢救 + 字段归一化，解析失败只给固定文案） |
 | `app/agents/stat_tools.py` | 统计建模算子 | `build_stat_tools()`（get_schema/load_table（支持 `filters` 多条件 AND）/group_aggregate/group_correlate/group_mom_growth/group_mom_growth_rate/group_cagr（年均增长率 CAGR）/group_share/group_vs_overall_avg/intersect_groups（条件值可引用另一列）/linear_regression/forecast_time_series/detect_anomalies/cluster_kmeans，只读，df_store 请求级隔离） |
 | `app/agents/analysis.py` | 分析结果模型与解析 | `AnalysisResult` / `parse_analysis()` / `_ANALYSIS_SYSTEM_PROMPT` / `build_analysis_system_prompt()`（注入 schema、要求一次性规划并行调用；DeepSeek 思考模式用手动 JSON 解析） |
 | `app/services/chart_service.py` | 图表类型推断（严格模式 + 多系列映射） | `suggest_chart_type()`（兼容薄壳）、`suggest_chart_series()`（按列顺序映射 type/axis，bar+line 时 line 挂右轴） |
 | `app/services/query_service.py` | 查询执行 | `run_query()` / `execute_sql()` / `_to_json_safe()` / `_extract_used_tables()`（解析 SQL 实际引用的表，供文档定位上文续接） |
-| `app/services/chat_service.py` | 闲聊 / 元数据咨询 + 文档问答 + 查询结果简短分析 | `chat_stream(question, history, schema_text, summary)` / `retrieval_stream(question, context)` / `summarize_query_result(question, columns, rows, row_count)` |
+| `app/services/chat_service.py` | 闲聊 / 元数据咨询 + 文档问答 + 查询结果简短分析 | `chat_stream(question, history, schema_text, summary, data_source_id)` / `schema_consult_stream(question, overview, data_source_id)` / `retrieval_stream(question, context)` / `summarize_query_result(question, columns, rows, row_count)` |
 | `app/services/context_service.py` | 闲聊上下文治理 | `build_chat_context()`（近期窗口截断 + 滚动摘要编排） |
 | `app/services/datasource_service.py` | Excel/CSV 上传导入 | `import_file()` / `list_datasources()` |
 | `app/services/connection_service.py` | 外部数据库连接管理 | `inspect_external()` / `list_saved_connections()` / `save_connection()` / `delete_connection()` / `seed_runtime_datasources()` |
